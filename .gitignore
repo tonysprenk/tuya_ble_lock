@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 *.pcapng
 device_schema.json
+CLAUDE.md
