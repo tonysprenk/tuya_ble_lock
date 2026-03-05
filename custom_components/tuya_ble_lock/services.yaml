@@ -1,0 +1,167 @@
+add_pin:
+  name: Add PIN code
+  description: >
+    Enroll a PIN code on one or more Tuya BLE locks for a specific member.
+    The PIN will be stored in the lock's memory and associated with the member.
+  fields:
+    device_id:
+      name: Lock device
+      description: The lock device(s) to add the PIN to.
+      required: true
+      selector:
+        device:
+          integration: tuya_ble_lock
+    person:
+      name: Person
+      description: HA person to associate this credential with. Leave empty for a generic member.
+      required: false
+      selector:
+        entity:
+          domain: person
+    pin_code:
+      name: PIN code
+      description: The PIN digits (6-10 digits, numbers only).
+      required: true
+      selector:
+        text:
+    admin:
+      name: Admin credential
+      description: Whether this is an admin credential.
+      required: false
+      default: false
+      selector:
+        boolean:
+
+add_fingerprint:
+  name: Start fingerprint enrollment
+  description: >
+    Begin fingerprint enrollment on a Tuya BLE lock. The user must place their
+    finger on the sensor 6 times when prompted. This is a long-running operation.
+  fields:
+    device_id:
+      name: Lock device
+      required: true
+      selector:
+        device:
+          integration: tuya_ble_lock
+    person:
+      name: Person
+      description: HA person to associate this credential with. Leave empty for a generic member.
+      required: false
+      selector:
+        entity:
+          domain: person
+    admin:
+      name: Admin credential
+      required: false
+      default: false
+      selector:
+        boolean:
+
+add_card:
+  name: Start card enrollment
+  description: >
+    Begin NFC/RFID card enrollment on a Tuya BLE lock. Tap the card on the
+    sensor when prompted.
+  fields:
+    device_id:
+      name: Lock device
+      required: true
+      selector:
+        device:
+          integration: tuya_ble_lock
+    person:
+      name: Person
+      description: HA person to associate this credential with. Leave empty for a generic member.
+      required: false
+      selector:
+        entity:
+          domain: person
+    admin:
+      name: Admin credential
+      required: false
+      default: false
+      selector:
+        boolean:
+
+delete_credential:
+  name: Delete credential
+  description: >
+    Delete credentials from a lock. Use person + type to delete by member,
+    or credential_id for a specific credential (from list_credentials).
+  fields:
+    device_id:
+      name: Lock device
+      required: true
+      selector:
+        device:
+          integration: tuya_ble_lock
+    person:
+      name: Person
+      description: Delete credentials belonging to this person.
+      required: false
+      selector:
+        entity:
+          domain: person
+    cred_type:
+      name: Credential type
+      description: Only delete this type (leave empty for all types).
+      required: false
+      selector:
+        select:
+          options:
+            - label: PIN
+              value: pin
+            - label: Fingerprint
+              value: fingerprint
+            - label: Card
+              value: card
+    credential_id:
+      name: Credential ID (advanced)
+      description: Delete a specific credential by UUID (from list_credentials service).
+      required: false
+      selector:
+        text:
+
+list_credentials:
+  name: List credentials
+  description: List all credentials stored for a lock, grouped by member and type.
+  fields:
+    device_id:
+      name: Lock device
+      required: true
+      selector:
+        device:
+          integration: tuya_ble_lock
+
+create_temp_password:
+  name: Create temporary password
+  description: >
+    Create a time-limited temporary password on the lock (DP 51).
+  fields:
+    device_id:
+      name: Lock device
+      required: true
+      selector:
+        device:
+          integration: tuya_ble_lock
+    name:
+      name: Password name
+      required: true
+      selector:
+        text:
+    pin_code:
+      name: PIN digits
+      required: true
+      selector:
+        text:
+    effective_time:
+      name: Start time
+      required: true
+      selector:
+        datetime:
+    expiry_time:
+      name: End time
+      required: true
+      selector:
+        datetime:

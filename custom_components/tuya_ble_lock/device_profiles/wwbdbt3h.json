@@ -1,0 +1,50 @@
+{
+  "product_id": "wwbdbt3h",
+  "name": "H8 Pro",
+  "model": "H8 Pro",
+  "category": "jtmspro",
+  "protocol_version": 3,
+  "entities": {
+    "lock": {
+      "unlock_dp": 71
+    },
+    "battery_sensor": {
+      "dp": [8]
+    },
+    "volume_select": {
+      "dp": 31,
+      "dp_type": "enum",
+      "options": ["mute", "low", "normal", "high"]
+    },
+    "passage_mode_switch": {
+      "dp": 33,
+      "dp_type": "bool"
+    },
+    "auto_lock_time_number": {
+      "dp": 36,
+      "dp_type": "value",
+      "min": 1,
+      "max": 600,
+      "unit": "s"
+    },
+    "double_lock_switch": {
+      "dp": 79,
+      "dp_type": "bool"
+    }
+  },
+  "services": {
+    "add_pin": { "dp": 1 },
+    "add_fingerprint": { "dp": 1, "sync_dp": 54 },
+    "add_card": { "dp": 1, "sync_dp": 54 },
+    "delete_credential": { "dp": 2 }
+  },
+  "state_map": {
+    "8": { "key": "battery_percent", "parse": "int" },
+    "9": { "key": "battery_state", "parse": "battery_state_enum" },
+    "33": { "key": "auto_lock", "parse": "bool" },
+    "36": { "key": "auto_lock_time", "parse": "int" },
+    "47": { "key": "motor_state", "parse": "bool" },
+    "79": { "key": "double_lock", "parse": "bool" },
+    "31": { "key": "volume", "parse": "raw_byte" }
+  }
+}

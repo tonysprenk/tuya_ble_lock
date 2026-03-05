@@ -1,0 +1,33 @@
+{
+  "product_id": "_default",
+  "name": "Tuya BLE Lock",
+  "model": "Unknown",
+  "category": "jtmspro",
+  "entities": {
+    "lock": {
+      "unlock_dp": 71,
+      "behavior": "momentary"
+    },
+    "battery_sensor": {
+      "dp": [8, 520],
+      "trigger_dp": 69,
+      "trigger_payload": "ffff0001303030303030303000"
+    },
+    "volume_select": {
+      "dp": 31,
+      "dp_type": "enum",
+      "options": ["mute", "normal"]
+    }
+  },
+  "services": {
+    "add_pin": { "dp": 1 },
+    "delete_credential": { "dp": 2 }
+  },
+  "state_map": {
+    "8": { "key": "battery_percent", "parse": "int" },
+    "520": { "key": "battery_percent", "parse": "int" },
+    "9": { "key": "battery_state", "parse": "battery_state_enum" },
+    "31": { "key": "volume", "parse": "raw_byte" },
+    "47": { "key": "_ignore", "parse": "ignore" }
+  }
+}

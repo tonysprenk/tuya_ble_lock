@@ -1,0 +1,102 @@
+{
+  "config": {
+    "step": {
+      "bluetooth": {
+        "description": "Tuya BLE Smart Lock discovered: {name}"
+      },
+      "user": {
+        "data": {
+          "mac": "MAC Address"
+        },
+        "description": "Enter the Bluetooth MAC address of your Tuya BLE lock."
+      },
+      "choose_method": {
+        "title": "Setup Method",
+        "description": "How would you like to set up {name}?",
+        "data": {
+          "setup_method": "Setup method"
+        }
+      },
+      "cloud_login": {
+        "title": "Tuya Cloud Credentials",
+        "description": "Enter your Tuya Smart or Smart Life app credentials. These are used to fetch encryption keys and device info.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "country_code": "Country code",
+          "region": "Cloud region"
+        }
+      },
+      "standalone": {
+        "title": "Standalone Pairing",
+        "description": "Select your lock model and enter Tuya credentials to fetch the auth key. Device UUID: {uuid}",
+        "data": {
+          "product_id": "Lock model",
+          "email": "Email",
+          "password": "Password",
+          "country_code": "Country code",
+          "region": "Tuya region"
+        }
+      },
+      "manual_auth": {
+        "title": "Manual Auth Key",
+        "description": "Paste the device auth key (hex string).",
+        "data": {
+          "auth_key": "Auth key (hex)"
+        }
+      },
+      "pair": {
+        "title": "Pairing",
+        "description": "Pairing with the lock... Please wait. Ensure the lock is in pairing mode."
+      },
+      "existing_credentials": {
+        "title": "Device Already Paired",
+        "description": "This lock is already bound from a previous pairing. Enter the existing login key and virtual ID, or factory reset the lock and try again.",
+        "data": {
+          "login_key": "Login key (hex)",
+          "virtual_id": "Virtual ID (hex)"
+        }
+      },
+      "confirm": {
+        "title": "Confirm Setup",
+        "description": "Ready to set up {name} ({mac})."
+      }
+    },
+    "error": {
+      "invalid_credentials": "Invalid Tuya cloud credentials.",
+      "auth_key_failed": "Could not retrieve encryption key from Tuya cloud.",
+      "pairing_failed": "BLE pairing failed. Ensure the lock is in pairing mode.",
+      "device_not_found": "Device not found. Ensure it is powered on and nearby.",
+      "no_uuid": "Could not determine device UUID from BLE advertisement. Try cloud setup or paste auth key manually."
+    },
+    "abort": {
+      "already_configured": "This lock is already configured."
+    }
+  },
+  "entity": {
+    "lock": {
+      "lock": { "name": "Lock" }
+    },
+    "sensor": {
+      "battery": { "name": "Battery" },
+      "battery_state": { "name": "Battery state" },
+      "uuid": { "name": "UUID" },
+      "login_key": { "name": "Login key" },
+      "virtual_id": { "name": "Virtual ID" },
+      "auth_key": { "name": "Auth key" }
+    },
+    "switch": {
+      "auto_lock": { "name": "Auto-lock" },
+      "double_lock": { "name": "Double lock" }
+    },
+    "select": {
+      "volume": { "name": "Keypad sound" }
+    },
+    "number": {
+      "auto_lock_time": { "name": "Auto-lock delay" }
+    },
+    "button": {
+      "refresh": { "name": "Refresh status" }
+    }
+  }
+}

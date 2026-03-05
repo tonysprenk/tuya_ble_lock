@@ -1,0 +1,41 @@
+{
+  "product_id": "qqmu5mit",
+  "name": "Smart Lock 3",
+  "model": "SYD8811",
+  "category": "jtmspro",
+  "notes": "SYD8811 does NOT honor DP 33 (auto_lock/passage mode) or DP 36 (auto_lock_time). Tested: device ACKs the writes but ignores them — no behavioral change.",
+  "entities": {
+    "lock": {
+      "unlock_dp": 71
+    },
+    "battery_sensor": {
+      "dp": [8, 520],
+      "trigger_dp": 69,
+      "trigger_payload": "ffff0001303030303030303000"
+    },
+    "volume_select": {
+      "dp": 31,
+      "dp_type": "enum",
+      "options": ["mute", "normal"]
+    },
+    "double_lock_switch": {
+      "dp": 79,
+      "dp_type": "bool"
+    }
+  },
+  "services": {
+    "add_pin": { "dp": 1 },
+    "add_fingerprint": { "dp": 1, "sync_dp": 54 },
+    "add_card": { "dp": 1, "sync_dp": 54 },
+    "delete_credential": { "dp": 2 },
+    "create_temp_password": { "dp": 51 }
+  },
+  "state_map": {
+    "8": { "key": "battery_percent", "parse": "int" },
+    "520": { "key": "battery_percent", "parse": "int" },
+    "9": { "key": "battery_state", "parse": "battery_state_enum" },
+    "79": { "key": "double_lock", "parse": "bool" },
+    "31": { "key": "volume", "parse": "raw_byte" },
+    "47": { "key": "motor_state", "parse": "bool" }
+  }
+}
