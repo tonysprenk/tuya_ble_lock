@@ -268,8 +268,25 @@ class TuyaMobileAPIAsync:
                         "name": dev.get("name", ""),
                         "productId": dev.get("productId", ""),
                         "gid": gid,
+                        "raw": dev,
                     }
         return None
+
+
+def _redact_cloud_value(value: Any) -> Any:
+    """Redact obvious secrets before writing mobile API payloads to HA logs."""
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, inner in value.items():
+            lowered = key.lower()
+            if lowered in {"localkey", "authkey", "token", "passwd", "password", "sid"}:
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = _redact_cloud_value(inner)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_cloud_value(item) for item in value]
+    return value
 
 
 async def async_fetch_auth_key_only(
@@ -404,3 +421,53 @@ async def async_fetch_check_code_dps(
         except Exception:
             _LOGGER.debug("Failed to decode base64 cloud DP %s value %r", dp_id, value, exc_info=True)
     return raw_dps
+
+
+async def async_fetch_cloud_lock_debug(
+    hass: HomeAssistant,
+    email: str,
+    password: str,
+    country_code: str,
+    region: str,
+    device_id: str,
+) -> dict[str, Any]:
+    """Fetch full mobile-api device object and raw DP payload map for debugging."""
+    stable_device_id = hashlib.sha256(
+        f"tuya_ble_lock|{email}|{device_id}|{region}".encode()
+    ).hexdigest()
+    session = async_get_clientsession(hass)
+    client = TuyaMobileAPIAsync(session, region=region, device_id=stable_device_id)
+    login_resp = await client.async_login(country_code, email, password)
+    if not login_resp.get("success"):
+        error = login_resp.get("errorMsg", login_resp.get("msg", "Login failed"))
+        raise Exception(f"Tuya login failed: {error}")
+
+    device_info = await client.async_find_device_by_dev_id(device_id)
+    if not device_info or not device_info.get("gid"):
+        raise Exception(f"Could not resolve gid for device {device_id}")
+
+    dp_resp = await client.async_get_device_dps(device_info["gid"], device_id)
+    result = dp_resp.get("result", {})
+    if isinstance(result, dict) and "result" in result:
+        result = result["result"]
+    if not isinstance(result, dict):
+        result = {}
+
+    decoded_dps: dict[str, str] = {}
+    for key, dp in result.items():
+        if not isinstance(dp, dict):
+            continue
+        value = dp.get("value")
+        if not isinstance(value, str):
+            continue
+        try:
+            decoded_dps[str(key)] = base64.b64decode(value).hex()
+        except Exception:
+            continue
+
+    return {
+        "device_info": _redact_cloud_value(device_info.get("raw", device_info)),
+        "device_info_keys": sorted(device_info.get("raw", device_info).keys()),
+        "dp_response": _redact_cloud_value(dp_resp),
+        "decoded_dp_hex": decoded_dps,
+    }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import struct
 import time
@@ -20,7 +21,7 @@ from .const import (
     CONF_TUYA_REGION,
 )
 from .device_profiles import parse_dp_value
-from .tuya_cloud import async_fetch_check_code_dps
+from .tuya_cloud import async_fetch_check_code_dps, async_fetch_cloud_lock_debug
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -300,6 +301,32 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             )
             self._cloud_check_payloads.update(cloud_dps)
             self.raw_dps.update(cloud_dps)
+
+        if self._lock_cfg().get("log_cloud_identity_debug"):
+            try:
+                debug = await async_fetch_cloud_lock_debug(
+                    self.hass,
+                    email=email,
+                    password=password,
+                    country_code=country,
+                    region=region,
+                    device_id=device_id,
+                )
+            except Exception as exc:
+                _LOGGER.warning("Cloud identity debug fetch failed for %s: %s", self._entry.title, exc)
+                return
+
+            _LOGGER.warning(
+                "Cloud identity debug for %s: device keys=%s decoded_dp_hex=%s",
+                self._entry.title,
+                debug.get("device_info_keys"),
+                debug.get("decoded_dp_hex"),
+            )
+            _LOGGER.warning(
+                "Cloud identity debug device object for %s: %s",
+                self._entry.title,
+                json.dumps(debug.get("device_info", {}), sort_keys=True, default=str),
+            )
 
     def _cloud_check_payload(self) -> bytes | None:
         payload = self._cloud_check_payloads.get(71)
