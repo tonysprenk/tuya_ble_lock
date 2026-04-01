@@ -81,6 +81,8 @@ class TuyaBLELockSession:
         self._dp_report_callback: Callable[[list[dict]], None] | None = None
         self._write_uuid: str = WRITE_UUID
         self._notify_uuid: str = NOTIFY_UUID
+        self._write_char = None
+        self._notify_char = None
 
     def _resolve_gatt_uuids(self) -> tuple[str | None, str | None]:
         """Find write and notify characteristic UUIDs from discovered services.
@@ -89,30 +91,47 @@ class TuyaBLELockSession:
         for any write-without-response + notify characteristic pair.
         Returns (write_uuid, notify_uuid) or (None, None) if not found.
         """
-        if not self._client or not self._client.services:
+        if not self._client:
+            return None, None
+
+        try:
+            services = self._client.services
+        except Exception as exc:
+            _LOGGER.warning("GATT services not ready for %s: %s", self._ble_device.address, exc)
+            return None, None
+
+        if not services:
             return None, None
 
         # Check if FD50 characteristics exist (get_characteristic returns None if not found)
-        write_char = self._client.services.get_characteristic(WRITE_UUID)
-        notify_char = self._client.services.get_characteristic(NOTIFY_UUID)
+        write_char = services.get_characteristic(WRITE_UUID)
+        notify_char = services.get_characteristic(NOTIFY_UUID)
         if write_char is not None and notify_char is not None:
             self._write_uuid = WRITE_UUID
             self._notify_uuid = NOTIFY_UUID
+            self._write_char = write_char
+            self._notify_char = notify_char
             _LOGGER.warning("Using FD50 GATT characteristics for %s", self._ble_device.address)
             return WRITE_UUID, NOTIFY_UUID
 
         # Fall back: scan all services for write-without-response + notify chars
         write_uuid = None
         notify_uuid = None
-        for svc in self._client.services:
+        write_char = None
+        notify_char = None
+        for svc in services:
             for char in svc.characteristics:
-                if "write-without-response" in char.properties and not write_uuid:
+                if "write-without-response" in char.properties and not write_char:
+                    write_char = char
                     write_uuid = char.uuid
-                if "notify" in char.properties and not notify_uuid:
+                if "notify" in char.properties and not notify_char:
+                    notify_char = char
                     notify_uuid = char.uuid
         if write_uuid and notify_uuid:
             self._write_uuid = write_uuid
             self._notify_uuid = notify_uuid
+            self._write_char = write_char
+            self._notify_char = notify_char
             _LOGGER.warning(
                 "Using discovered GATT characteristics for %s: write=%s notify=%s",
                 self._ble_device.address, write_uuid, notify_uuid,
@@ -172,7 +191,8 @@ class TuyaBLELockSession:
         _LOGGER.debug("GATT WRITE cmd=0x%04x sec=%d frags=%d", cmd, sec_flag, len(writes))
         for i, w in enumerate(writes):
             _LOGGER.debug("  frag[%d]: len=%d hex=%s", i, len(w), w.hex())
-            await self._client.write_gatt_char(self._write_uuid, w, response=False)
+            target = self._write_char or self._write_uuid
+            await self._client.write_gatt_char(target, w, response=False)
             await asyncio.sleep(0.05)
 
     async def _send_recv(self, cmd: int, data: bytes, sec_flag: int, wait: float = 8.0) -> list[dict]:
@@ -317,8 +337,13 @@ class TuyaBLELockSession:
                     max_attempts=2,
                 )
                 # Log discovered services on first successful connection
-                if self._client.services:
-                    for svc in self._client.services:
+                try:
+                    services = self._client.services
+                except Exception as exc:
+                    services = None
+                    _LOGGER.warning("Service discovery not ready for %s: %s", self._ble_device.address, exc)
+                if services:
+                    for svc in services:
                         chars = [f"{c.uuid}({','.join(c.properties)})" for c in svc.characteristics]
                         _LOGGER.warning("  GATT Service %s: %s", svc.uuid, chars)
                 else:
@@ -336,13 +361,13 @@ class TuyaBLELockSession:
                     continue
                 # Always try stop_notify first to release any stale subscription
                 try:
-                    await self._client.stop_notify(notify_uuid)
+                    await self._client.stop_notify(self._notify_char or notify_uuid)
                     await asyncio.sleep(0.2)
                 except Exception:
                     pass
                 self._notif_buf.clear()
                 _LOGGER.warning("Starting notify on %s for %s", notify_uuid, self._ble_device.address)
-                await self._client.start_notify(notify_uuid, self._on_notify)
+                await self._client.start_notify(self._notify_char or notify_uuid, self._on_notify)
                 self.is_connected = True
 
                 # Some devices (e.g. H8 Pro with service 1910) auto-push
@@ -468,7 +493,7 @@ class TuyaBLELockSession:
     async def async_disconnect(self) -> None:
         if self._client:
             try:
-                await self._client.stop_notify(self._notify_uuid)
+                await self._client.stop_notify(self._notify_char or self._notify_uuid)
             except Exception:
                 pass
             try:
@@ -476,6 +501,8 @@ class TuyaBLELockSession:
             except Exception:
                 pass
             self._client = None
+        self._write_char = None
+        self._notify_char = None
         self.is_connected = False
 
     def _build_dp_payload(self, dp_id: int, dp_type: int, value: bytes) -> tuple[int, bytes]:

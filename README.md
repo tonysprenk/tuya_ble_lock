@@ -81,7 +81,7 @@ The integration uses JSON device profiles to handle per-model differences. To ad
 
 | Key | Entity | Notes |
 |-----|--------|-------|
-| `lock` | Lock entity | `unlock_dp` is the DP used for lock/unlock (usually 71) |
+| `lock` | Lock entity | `unlock_dp` is the DP used for lock/unlock (usually 71). Optional `check_code` overrides the 8-byte ASCII DP71 check code. Optional `check_code_dp` lets the integration learn that code from raw DP reports such as 73 or 71 before falling back to `check_code`. |
 | `battery_sensor` | Battery sensor | `dp`: array of DPs to read. Optional `trigger_dp` + `trigger_payload` for models that need a trigger. |
 | `volume_select` | Volume dropdown | `options`: list of volume level names |
 | `double_lock_switch` | Privacy lock switch | `dp`: DP number, `dp_type`: `"bool"` |

@@ -19,6 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Check code — SYD8811 does NOT validate, H8 Pro rejects all-zeros.
 DEFAULT_CHECK_CODE = b"12345678"
+DEFAULT_CHECK_CODE_SOURCE_DPS = (73, 71)
 
 # Keep BLE connection alive for this long after last operation
 IDLE_DISCONNECT_SECONDS = 60
@@ -42,6 +43,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
         # Build state dict from profile's state_map
         self.state: dict[str, Any] = {}
+        self.raw_dps: dict[int, bytes] = {}
         for dp_str, mapping in profile.get("state_map", {}).items():
             key = mapping.get("key", "")
             if key and key != "_ignore" and key not in self.state:
@@ -61,6 +63,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         state_map = self._profile.get("state_map", {})
         changed = False
         for dp in dps:
+            self.raw_dps[dp["id"]] = bytes(dp["raw"])
             dp_id_str = str(dp["id"])
             mapping = state_map.get(dp_id_str)
             if not mapping:
@@ -185,6 +188,74 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             if not await self._session.async_connect():
                 raise UpdateFailed("BLE connection to lock failed")
 
+    def _lock_cfg(self) -> dict:
+        return self._profile.get("entities", {}).get("lock", {})
+
+    @staticmethod
+    def _normalize_check_code(value: bytes | str | None) -> bytes | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.encode("ascii", errors="ignore")
+        else:
+            value = bytes(value)
+        value = (value + b"\x00" * 8)[:8]
+        if not value.strip(b"\x00"):
+            return None
+        return value
+
+    @staticmethod
+    def _extract_check_code_from_dp(raw: bytes) -> bytes | None:
+        """Extract the 8-byte ASCII check code from a DP 71/73-style payload."""
+        if len(raw) < 12:
+            return None
+        candidate = raw[4:12]
+        if all(0x20 <= b <= 0x7E for b in candidate):
+            return candidate
+        return None
+
+    def _configured_check_code(self) -> bytes | None:
+        return self._normalize_check_code(self._lock_cfg().get("check_code"))
+
+    def _runtime_check_code(self) -> bytes | None:
+        source_dps = self._lock_cfg().get("check_code_dp", DEFAULT_CHECK_CODE_SOURCE_DPS)
+        if isinstance(source_dps, int):
+            source_dps = [source_dps]
+        for dp_id in source_dps:
+            try:
+                raw = self.raw_dps.get(int(dp_id))
+            except (TypeError, ValueError):
+                continue
+            if not raw:
+                continue
+            candidate = self._extract_check_code_from_dp(raw)
+            if candidate:
+                return candidate
+        return None
+
+    def _get_check_code(self) -> bytes:
+        return (
+            self._runtime_check_code()
+            or self._configured_check_code()
+            or DEFAULT_CHECK_CODE
+        )
+
+    def _get_payload_version(self) -> int:
+        value = self._lock_cfg().get("payload_version", 1)
+        try:
+            return int(value) & 0xFFFF
+        except (TypeError, ValueError):
+            return 1
+
+    def _get_member_id(self) -> int:
+        value = self._lock_cfg().get("member_id", 0xFFFF)
+        try:
+            if isinstance(value, str):
+                return int(value, 0) & 0xFFFF
+            return int(value) & 0xFFFF
+        except (TypeError, ValueError):
+            return 0xFFFF
+
     def _build_unlock_payload(self, action_unlock: bool) -> bytes:
         """Build unlock/lock DP RAW payload.
 
@@ -196,9 +267,9 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
           [4B BE]       Unix timestamp
           [00 00]       padding
         """
-        code = (DEFAULT_CHECK_CODE + b"\x00" * 8)[:8]
+        code = self._get_check_code()
         ts = int(time.time())
-        payload = struct.pack(">HH", 1, 0xFFFF)
+        payload = struct.pack(">HH", self._get_payload_version(), self._get_member_id())
         payload += code
         payload += bytes([0x01 if action_unlock else 0x00])
         payload += struct.pack(">I", ts)
@@ -207,8 +278,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     def _get_unlock_dp(self) -> int:
         """Get the unlock DP ID from profile."""
-        lock_cfg = self._profile.get("entities", {}).get("lock", {})
-        return lock_cfg.get("unlock_dp", 71)
+        return self._lock_cfg().get("unlock_dp", 71)
 
     async def async_lock(self) -> None:
         async with self._op_lock:

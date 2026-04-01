@@ -1,0 +1,53 @@
+{
+  "product_id": "hc7n0urm",
+  "name": "Raykube A1 Ultra-JM",
+  "model": "A1 Ultra-JM",
+  "category": "jtmspro",
+  "entities": {
+    "lock": {
+      "unlock_dp": 71,
+      "behavior": "momentary",
+      "check_code": "49945663",
+      "check_code_dp": [73, 71]
+    },
+    "battery_sensor": {
+      "dp": [9]
+    },
+    "volume_select": {
+      "dp": 31,
+      "dp_type": "enum",
+      "options": ["mute", "normal"]
+    },
+    "passage_mode_switch": {
+      "dp": 33,
+      "dp_type": "bool"
+    },
+    "auto_lock_time_number": {
+      "dp": 36,
+      "dp_type": "value",
+      "min": 1,
+      "max": 1800,
+      "unit": "s"
+    }
+  },
+  "services": {
+    "add_pin": { "dp": 1 },
+    "add_fingerprint": { "dp": 1, "sync_dp": 54 },
+    "add_card": { "dp": 1, "sync_dp": 54 },
+    "delete_credential": { "dp": 2 }
+  },
+  "state_map": {
+    "9": { "key": "battery_state", "parse": "battery_state_enum" },
+    "31": { "key": "volume", "parse": "raw_byte" },
+    "33": { "key": "auto_lock", "parse": "bool" },
+    "36": { "key": "auto_lock_time", "parse": "int" },
+    "46": { "key": "_ignore", "parse": "ignore" },
+    "47": { "key": "motor_state", "parse": "bool" },
+    "61": { "key": "_ignore", "parse": "ignore" },
+    "70": { "key": "_ignore", "parse": "ignore" },
+    "71": { "key": "_ignore", "parse": "ignore" },
+    "72": { "key": "_ignore", "parse": "ignore" },
+    "73": { "key": "_ignore", "parse": "ignore" },
+    "78": { "key": "_ignore", "parse": "ignore" }
+  }
+}
