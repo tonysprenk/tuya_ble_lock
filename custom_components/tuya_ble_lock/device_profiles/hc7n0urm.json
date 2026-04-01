@@ -9,7 +9,8 @@
       "behavior": "momentary",
       "check_code": "49945663",
       "check_code_dp": [73, 71],
-      "use_cloud_check_payload": true
+      "use_cloud_check_payload": true,
+      "pair_central_dp70": true
     },
     "battery_sensor": {
       "dp": [9]

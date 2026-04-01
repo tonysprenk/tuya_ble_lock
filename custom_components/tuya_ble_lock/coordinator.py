@@ -307,6 +307,55 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             return None
         return payload
 
+    def _build_dp70_pair_payload(self) -> bytes | None:
+        """Build a DP70 add-central payload from the current cloud DP71 identity.
+
+        Tuya's accessory lock flow requires DP70 pairing before DP71 unlock/lock.
+        We derive the central ID and random from the current cloud DP71 payload:
+
+          DP71: [central_id:2][peripheral_id:2][random:8][action:1][ts:4][method:1][info:1]
+
+        Then we send DP70 add using the documented initial initiator identity:
+
+          DP70: [ffff][peripheral_id][0000000000000000][00 add][central_id][random]
+        """
+        cloud_payload = self._cloud_check_payload()
+        if not cloud_payload or len(cloud_payload) < 12:
+            return None
+
+        central_id = cloud_payload[0:2]
+        peripheral_id = cloud_payload[2:4]
+        random_number = cloud_payload[4:12]
+
+        initiator_id = b"\xff\xff"
+        initiator_random = b"\x00" * 8
+        action_add = b"\x00"
+        return initiator_id + peripheral_id + initiator_random + action_add + central_id + random_number
+
+    async def _async_pair_central_from_cloud(self) -> None:
+        """Best-effort DP70 add before DP71 commands for profiles that need it."""
+        if not self._lock_cfg().get("pair_central_dp70"):
+            return
+
+        pair_payload = self._build_dp70_pair_payload()
+        if not pair_payload:
+            return
+
+        _LOGGER.warning("Sending DP70 pair/add payload (%d bytes): %s", len(pair_payload), pair_payload.hex())
+        try:
+            dp = await self._session.async_send_dp_raw(70, pair_payload)
+        except Exception as exc:
+            _LOGGER.warning("DP70 pair/add failed: %s", exc)
+            return
+
+        if not dp:
+            _LOGGER.warning("DP70 pair/add returned no matching response")
+            return
+
+        raw = bytes(dp["raw"])
+        return_code = raw[-1] if raw else None
+        _LOGGER.warning("DP70 pair/add response: %s (return=%s)", raw.hex(), return_code)
+
     def _get_payload_version(self) -> int:
         value = self._lock_cfg().get("payload_version", 1)
         try:
@@ -358,6 +407,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         async with self._op_lock:
             await self._async_refresh_check_code_from_cloud()
             await self._async_ensure_connected()
+            await self._async_pair_central_from_cloud()
             unlock_dp = self._get_unlock_dp()
             payload = self._build_unlock_payload(action_unlock=False)
             _LOGGER.warning("Sending lock command (DP %d RAW, %d bytes): %s", unlock_dp, len(payload), payload.hex())
@@ -377,6 +427,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         async with self._op_lock:
             await self._async_refresh_check_code_from_cloud()
             await self._async_ensure_connected()
+            await self._async_pair_central_from_cloud()
             unlock_dp = self._get_unlock_dp()
             payload = self._build_unlock_payload(action_unlock=True)
             _LOGGER.warning("Sending unlock command (DP %d RAW, %d bytes): %s", unlock_dp, len(payload), payload.hex())
