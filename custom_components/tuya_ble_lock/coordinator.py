@@ -191,7 +191,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         """Connect to the lock and refresh all status DPs."""
         async with self._op_lock:
             try:
-                if not self._session.is_connected and await self._async_refresh_status_from_cloud():
+                if await self._async_refresh_status_from_cloud():
                     return self.state
                 await self._async_ensure_connected()
                 await self._fetch_status()
