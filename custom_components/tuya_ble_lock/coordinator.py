@@ -331,6 +331,19 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             return None
         return payload
 
+    @staticmethod
+    def _swap_response_ids_to_command(payload: bytes) -> bytes:
+        """Convert Tuya lock response-style payloads into command-style payloads.
+
+        Tuya cloud stores the latest device-side response for DP70/71/73, where the
+        first 4 bytes are:
+          response: [peripheral_id][central_id]
+          command:  [central_id][peripheral_id]
+        """
+        if len(payload) < 4:
+            return payload
+        return payload[2:4] + payload[0:2] + payload[4:]
+
     def _build_dp70_pair_payload(self) -> bytes | None:
         """Build a DP70 add-central payload from the current cloud DP71 identity.
 
@@ -345,7 +358,16 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         """
         cloud_dp70 = self._cloud_dp70_payload()
         if cloud_dp70:
-            return cloud_dp70
+            if len(cloud_dp70) == 16:
+                # Cloud stores the device response: [peripheral][central][random][action][pair_id][return]
+                peripheral_id = cloud_dp70[0:2]
+                central_id = cloud_dp70[2:4]
+                random_number = cloud_dp70[4:12]
+                action = cloud_dp70[12:13]
+                pair_central_id = cloud_dp70[13:15]
+                pair_random = b"\x00" * 8
+                return central_id + peripheral_id + random_number + action + pair_central_id + pair_random
+            return self._swap_response_ids_to_command(cloud_dp70)
 
         cloud_payload = self._cloud_check_payload()
         if not cloud_payload or len(cloud_payload) < 12:
@@ -414,7 +436,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         if self._lock_cfg().get("use_cloud_check_payload"):
             cloud_payload = self._cloud_check_payload()
             if cloud_payload:
-                payload = bytearray(cloud_payload)
+                payload = bytearray(self._swap_response_ids_to_command(cloud_payload))
                 payload[12] = 0x01 if action_unlock else 0x00
                 return bytes(payload)
 
