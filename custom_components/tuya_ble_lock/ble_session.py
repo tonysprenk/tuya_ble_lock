@@ -14,6 +14,7 @@ import time
 from typing import Callable
 
 from bleak import BleakClient
+from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
@@ -165,6 +166,26 @@ class TuyaBLELockSession:
             combined = self._auth_key.hex().encode("ascii") + srand
             self._keys[SEC_AUTH_SESSION] = hashlib.md5(combined).digest()
 
+    async def _ensure_services_ready(self) -> None:
+        """Best-effort service discovery refresh for backends that race writes."""
+        if not self._client:
+            raise RuntimeError("BLE client is not connected")
+
+        # Some backends expose services lazily. Force discovery if the API exists.
+        get_services = getattr(self._client, "get_services", None)
+        if callable(get_services):
+            try:
+                maybe_services = get_services()
+                if asyncio.iscoroutine(maybe_services):
+                    await maybe_services
+            except Exception as exc:
+                _LOGGER.debug("get_services() failed for %s: %s", self._ble_device.address, exc)
+
+        # Resolve characteristic handles again after discovery.
+        write_uuid, notify_uuid = self._resolve_gatt_uuids()
+        if not write_uuid or not notify_uuid:
+            raise RuntimeError(f"No compatible GATT characteristics found for {self._ble_device.address}")
+
     async def _send_encrypted(self, cmd: int, data: bytes, sec_flag: int, ack_sn: int = 0):
         """Build encrypted fragments and write via GATT."""
         key = self._keys.get(sec_flag)
@@ -191,8 +212,21 @@ class TuyaBLELockSession:
         _LOGGER.debug("GATT WRITE cmd=0x%04x sec=%d frags=%d", cmd, sec_flag, len(writes))
         for i, w in enumerate(writes):
             _LOGGER.debug("  frag[%d]: len=%d hex=%s", i, len(w), w.hex())
-            target = self._write_char or self._write_uuid
-            await self._client.write_gatt_char(target, w, response=False)
+            for attempt in range(3):
+                try:
+                    await self._ensure_services_ready()
+                    target = self._write_char or self._write_uuid
+                    await self._client.write_gatt_char(target, w, response=False)
+                    break
+                except (BleakError, RuntimeError) as exc:
+                    if "Service Discovery has not been performed yet" not in str(exc) or attempt == 2:
+                        raise
+                    _LOGGER.warning(
+                        "GATT write hit service discovery race for %s, retrying (%d/3)",
+                        self._ble_device.address,
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(0.5)
             await asyncio.sleep(0.05)
 
     async def _send_recv(self, cmd: int, data: bytes, sec_flag: int, wait: float = 8.0) -> list[dict]:
@@ -368,6 +402,7 @@ class TuyaBLELockSession:
                 self._notif_buf.clear()
                 _LOGGER.warning("Starting notify on %s for %s", notify_uuid, self._ble_device.address)
                 await self._client.start_notify(self._notify_char or notify_uuid, self._on_notify)
+                await self._ensure_services_ready()
                 self.is_connected = True
 
                 # Some devices (e.g. H8 Pro with service 1910) auto-push

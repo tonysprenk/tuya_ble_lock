@@ -1,7 +1,7 @@
 {
   "domain": "tuya_ble_lock",
   "name": "Tuya BLE Lock",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "codeowners": ["@tkhadimullin"],
   "config_flow": true,
   "documentation": "https://github.com/tkhadimullin/tuya_ble_lock/blob/main/docs/integration.md",
