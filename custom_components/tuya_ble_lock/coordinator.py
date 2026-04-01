@@ -504,14 +504,12 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     async def async_lock(self) -> None:
         async with self._op_lock:
-            await self._async_refresh_check_code_from_cloud()
             await self._async_ensure_connected()
             await self._async_pair_central_from_cloud()
             await self._async_send_lock_action(action_unlock=False, allow_retry=True)
 
     async def async_unlock(self) -> None:
         async with self._op_lock:
-            await self._async_refresh_check_code_from_cloud()
             await self._async_ensure_connected()
             await self._async_pair_central_from_cloud()
             await self._async_send_lock_action(action_unlock=True, allow_retry=True)
