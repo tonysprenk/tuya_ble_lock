@@ -21,7 +21,7 @@ from .const import (
     CONF_TUYA_REGION,
 )
 from .device_profiles import parse_dp_value
-from .tuya_cloud import async_fetch_check_code_dps, async_fetch_cloud_lock_debug
+from .tuya_cloud import async_fetch_cloud_lock_bundle
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -280,7 +280,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             source_dps = tuple(int(dp_id) for dp_id in source_dps)
 
         try:
-            cloud_dps = await async_fetch_check_code_dps(
+            cloud_bundle = await async_fetch_cloud_lock_bundle(
                 self.hass,
                 email=email,
                 password=password,
@@ -293,6 +293,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Cloud check-code refresh failed for %s: %s", self._entry.title, exc, exc_info=True)
             return
 
+        cloud_dps = cloud_bundle["raw_dps"]
         if cloud_dps:
             _LOGGER.warning(
                 "Refreshed cloud check-code DPs for %s: %s",
@@ -303,29 +304,16 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             self.raw_dps.update(cloud_dps)
 
         if self._lock_cfg().get("log_cloud_identity_debug"):
-            try:
-                debug = await async_fetch_cloud_lock_debug(
-                    self.hass,
-                    email=email,
-                    password=password,
-                    country_code=country,
-                    region=region,
-                    device_id=device_id,
-                )
-            except Exception as exc:
-                _LOGGER.warning("Cloud identity debug fetch failed for %s: %s", self._entry.title, exc)
-                return
-
             _LOGGER.warning(
                 "Cloud identity debug for %s: device keys=%s decoded_dp_hex=%s",
                 self._entry.title,
-                debug.get("device_info_keys"),
-                debug.get("decoded_dp_hex"),
+                cloud_bundle.get("device_info_keys"),
+                cloud_bundle.get("decoded_dp_hex"),
             )
             _LOGGER.warning(
                 "Cloud identity debug device object for %s: %s",
                 self._entry.title,
-                json.dumps(debug.get("device_info", {}), sort_keys=True, default=str),
+                json.dumps(cloud_bundle.get("device_info", {}), sort_keys=True, default=str),
             )
 
     def _cloud_check_payload(self) -> bytes | None:
