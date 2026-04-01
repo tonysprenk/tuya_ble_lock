@@ -10,8 +10,9 @@
       "check_code": "49945663",
       "check_code_dp": [73, 71],
       "use_cloud_check_payload": true,
-      "pair_central_dp70": true,
-      "log_cloud_identity_debug": true
+      "cloud_refresh_interval_seconds": 300,
+      "pair_central_dp70": false,
+      "log_cloud_identity_debug": false
     },
     "battery_sensor": {
       "dp": [9]

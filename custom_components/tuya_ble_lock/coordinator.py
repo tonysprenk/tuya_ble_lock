@@ -49,6 +49,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self._idle_timer: asyncio.TimerHandle | None = None
         self._listener_task: asyncio.Task | None = None
         self._cloud_check_payloads: dict[int, bytes] = {}
+        self._last_cloud_refresh_at = 0.0
 
         # Build state dict from profile's state_map
         self.state: dict[str, Any] = {}
@@ -67,8 +68,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     def _process_dp_reports(self, dps: list[dict]) -> None:
         """Update state from DP reports using profile's state_map."""
-        _LOGGER.warning("Processing %d DPs: %s", len(dps),
-                        [(dp["id"], dp["raw"].hex()) for dp in dps])
+        _LOGGER.debug("Processing %d DPs: %s", len(dps), [(dp["id"], dp["raw"].hex()) for dp in dps])
         state_map = self._profile.get("state_map", {})
         changed = False
         for dp in dps:
@@ -128,8 +128,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                         from .ble_protocol import parse_frames
                         frames = parse_frames(self._session._keys, raw)
                         if frames:
-                            _LOGGER.warning("Listener: %d frames from %d notifications",
-                                            len(frames), len(raw))
+                            _LOGGER.debug("Listener: %d frames from %d notifications", len(frames), len(raw))
                             self._session._dispatch_dp_reports(frames)
         except Exception as exc:
             _LOGGER.debug("Notification listener error: %s", exc)
@@ -139,7 +138,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         """Disconnect after idle timeout."""
         self._idle_timer = None
         if self._session.is_connected:
-            _LOGGER.warning("Idle timeout (%ds), disconnecting BLE", IDLE_DISCONNECT_SECONDS)
+            _LOGGER.debug("Idle timeout (%ds), disconnecting BLE", IDLE_DISCONNECT_SECONDS)
             await self._session.async_disconnect()
         # Listener will exit on its own when is_connected becomes False
 
@@ -161,7 +160,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                     await self._session.async_send_dp_raw(trigger_dp, trigger_payload)
                 # Collect any pushed DPs (triggered or auto-pushed after commands)
                 extra = await self._session._collect(timeout=3.0)
-                _LOGGER.warning("Status collect: %d frames", len(extra))
+                _LOGGER.debug("Status collect: %d frames", len(extra))
                 self._session._dispatch_dp_reports(extra)
             except Exception as exc:
                 _LOGGER.warning("Status fetch failed: %s", exc)
@@ -259,8 +258,20 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             or DEFAULT_CHECK_CODE
         )
 
-    async def _async_refresh_check_code_from_cloud(self) -> None:
+    def _cloud_refresh_interval_seconds(self) -> float:
+        value = self._lock_cfg().get("cloud_refresh_interval_seconds", 300)
+        try:
+            return max(float(value), 0.0)
+        except (TypeError, ValueError):
+            return 300.0
+
+    async def _async_refresh_check_code_from_cloud(self, *, force: bool = False) -> None:
         """Fetch the latest rotating check code from Tuya cloud when available."""
+        if not force and self._cloud_check_payloads:
+            elapsed = time.monotonic() - self._last_cloud_refresh_at
+            if elapsed < self._cloud_refresh_interval_seconds():
+                return
+
         options = self._entry.options
         email = options.get(CONF_TUYA_EMAIL)
         password = options.get(CONF_TUYA_PASSWORD)
@@ -298,13 +309,14 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
         cloud_dps = cloud_bundle["raw_dps"]
         if cloud_dps:
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Refreshed cloud check-code DPs for %s: %s",
                 self._entry.title,
                 [(dp_id, raw.hex()) for dp_id, raw in cloud_dps.items()],
             )
             self._cloud_check_payloads.update(cloud_dps)
             self.raw_dps.update(cloud_dps)
+            self._last_cloud_refresh_at = time.monotonic()
 
         if self._lock_cfg().get("log_cloud_identity_debug"):
             _LOGGER.warning(
@@ -453,45 +465,56 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         """Get the unlock DP ID from profile."""
         return self._lock_cfg().get("unlock_dp", 71)
 
+    def _dp_result_code(self, dp_id: int) -> int | None:
+        raw = self.raw_dps.get(dp_id)
+        if not raw:
+            return None
+        return raw[-1]
+
+    async def _async_send_lock_action(self, *, action_unlock: bool, allow_retry: bool) -> None:
+        unlock_dp = self._get_unlock_dp()
+        payload = self._build_unlock_payload(action_unlock=action_unlock)
+        action_name = "unlock" if action_unlock else "lock"
+        _LOGGER.debug("Sending %s command (DP %d RAW, %d bytes): %s", action_name, unlock_dp, len(payload), payload.hex())
+        try:
+            await self._session.async_send_dp_fire_and_forget(unlock_dp, 0, payload)
+        except Exception as exc:
+            _LOGGER.warning("%s command failed, reconnecting: %s", action_name.capitalize(), exc)
+            self._session.is_connected = False
+            await self._async_ensure_connected()
+            payload = self._build_unlock_payload(action_unlock=action_unlock)
+            await self._session.async_send_dp_fire_and_forget(unlock_dp, 0, payload)
+
+        await self._fetch_status()
+        result_code = self._dp_result_code(unlock_dp)
+        if allow_retry and result_code not in (None, 0):
+            _LOGGER.warning(
+                "DP%d returned result=%d after %s, forcing cloud refresh and retrying once",
+                unlock_dp,
+                result_code,
+                action_name,
+            )
+            await self._async_refresh_check_code_from_cloud(force=True)
+            await self._async_pair_central_from_cloud()
+            await self._async_send_lock_action(action_unlock=action_unlock, allow_retry=False)
+            return
+
+        self.async_set_updated_data(self.state)
+        self._reset_idle_timer()
+
     async def async_lock(self) -> None:
         async with self._op_lock:
             await self._async_refresh_check_code_from_cloud()
             await self._async_ensure_connected()
             await self._async_pair_central_from_cloud()
-            unlock_dp = self._get_unlock_dp()
-            payload = self._build_unlock_payload(action_unlock=False)
-            _LOGGER.warning("Sending lock command (DP %d RAW, %d bytes): %s", unlock_dp, len(payload), payload.hex())
-            try:
-                await self._session.async_send_dp_fire_and_forget(unlock_dp, 0, payload)
-            except Exception as exc:
-                _LOGGER.warning("Lock command failed, reconnecting: %s", exc)
-                self._session.is_connected = False
-                await self._async_ensure_connected()
-                payload = self._build_unlock_payload(action_unlock=False)
-                await self._session.async_send_dp_fire_and_forget(unlock_dp, 0, payload)
-            await self._fetch_status()
-            self.async_set_updated_data(self.state)
-            self._reset_idle_timer()
+            await self._async_send_lock_action(action_unlock=False, allow_retry=True)
 
     async def async_unlock(self) -> None:
         async with self._op_lock:
             await self._async_refresh_check_code_from_cloud()
             await self._async_ensure_connected()
             await self._async_pair_central_from_cloud()
-            unlock_dp = self._get_unlock_dp()
-            payload = self._build_unlock_payload(action_unlock=True)
-            _LOGGER.warning("Sending unlock command (DP %d RAW, %d bytes): %s", unlock_dp, len(payload), payload.hex())
-            try:
-                await self._session.async_send_dp_fire_and_forget(unlock_dp, 0, payload)
-            except Exception as exc:
-                _LOGGER.warning("Unlock command failed, reconnecting: %s", exc)
-                self._session.is_connected = False
-                await self._async_ensure_connected()
-                payload = self._build_unlock_payload(action_unlock=True)
-                await self._session.async_send_dp_fire_and_forget(unlock_dp, 0, payload)
-            await self._fetch_status()
-            self.async_set_updated_data(self.state)
-            self._reset_idle_timer()
+            await self._async_send_lock_action(action_unlock=True, allow_retry=True)
 
     async def async_set_double_lock(self, enabled: bool) -> None:
         dl_cfg = self._profile.get("entities", {}).get("double_lock_switch")
