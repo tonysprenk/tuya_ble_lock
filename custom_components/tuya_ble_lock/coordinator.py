@@ -275,9 +275,12 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
         source_dps = self._lock_cfg().get("check_code_dp", DEFAULT_CHECK_CODE_SOURCE_DPS)
         if isinstance(source_dps, int):
-            source_dps = (source_dps,)
+            source_dps = {int(source_dps)}
         else:
-            source_dps = tuple(int(dp_id) for dp_id in source_dps)
+            source_dps = {int(dp_id) for dp_id in source_dps}
+        if self._lock_cfg().get("pair_central_dp70"):
+            source_dps.add(70)
+        source_dps = tuple(sorted(source_dps))
 
         try:
             cloud_bundle = await async_fetch_cloud_lock_bundle(
@@ -322,6 +325,12 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             return None
         return payload
 
+    def _cloud_dp70_payload(self) -> bytes | None:
+        payload = self._cloud_check_payloads.get(70)
+        if not payload:
+            return None
+        return payload
+
     def _build_dp70_pair_payload(self) -> bytes | None:
         """Build a DP70 add-central payload from the current cloud DP71 identity.
 
@@ -334,6 +343,10 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
           DP70: [ffff][peripheral_id][0000000000000000][00 add][central_id][random]
         """
+        cloud_dp70 = self._cloud_dp70_payload()
+        if cloud_dp70:
+            return cloud_dp70
+
         cloud_payload = self._cloud_check_payload()
         if not cloud_payload or len(cloud_payload) < 12:
             return None
