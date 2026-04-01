@@ -13,7 +13,14 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .const import (
+    CONF_TUYA_COUNTRY,
+    CONF_TUYA_EMAIL,
+    CONF_TUYA_PASSWORD,
+    CONF_TUYA_REGION,
+)
 from .device_profiles import parse_dp_value
+from .tuya_cloud import async_fetch_check_code_dps
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -188,6 +195,16 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             if not await self._session.async_connect():
                 raise UpdateFailed("BLE connection to lock failed")
 
+    def _device_id_from_virtual_id(self) -> str:
+        try:
+            raw = bytes.fromhex(self._entry.data.get("virtual_id", ""))
+        except ValueError:
+            return ""
+        try:
+            return raw.rstrip(b"\x00").decode("ascii")
+        except UnicodeDecodeError:
+            return ""
+
     def _lock_cfg(self) -> dict:
         return self._profile.get("entities", {}).get("lock", {})
 
@@ -240,6 +257,48 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             or DEFAULT_CHECK_CODE
         )
 
+    async def _async_refresh_check_code_from_cloud(self) -> None:
+        """Fetch the latest rotating check code from Tuya cloud when available."""
+        options = self._entry.options
+        email = options.get(CONF_TUYA_EMAIL)
+        password = options.get(CONF_TUYA_PASSWORD)
+        country = options.get(CONF_TUYA_COUNTRY)
+        region = options.get(CONF_TUYA_REGION)
+        if not all((email, password, country, region)):
+            return
+
+        device_id = self._device_id_from_virtual_id()
+        if not device_id:
+            return
+
+        source_dps = self._lock_cfg().get("check_code_dp", DEFAULT_CHECK_CODE_SOURCE_DPS)
+        if isinstance(source_dps, int):
+            source_dps = (source_dps,)
+        else:
+            source_dps = tuple(int(dp_id) for dp_id in source_dps)
+
+        try:
+            cloud_dps = await async_fetch_check_code_dps(
+                self.hass,
+                email=email,
+                password=password,
+                country_code=country,
+                region=region,
+                device_id=device_id,
+                source_dps=source_dps,
+            )
+        except Exception as exc:
+            _LOGGER.debug("Cloud check-code refresh failed for %s: %s", self._entry.title, exc, exc_info=True)
+            return
+
+        if cloud_dps:
+            _LOGGER.warning(
+                "Refreshed cloud check-code DPs for %s: %s",
+                self._entry.title,
+                [(dp_id, raw.hex()) for dp_id, raw in cloud_dps.items()],
+            )
+            self.raw_dps.update(cloud_dps)
+
     def _get_payload_version(self) -> int:
         value = self._lock_cfg().get("payload_version", 1)
         try:
@@ -282,6 +341,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     async def async_lock(self) -> None:
         async with self._op_lock:
+            await self._async_refresh_check_code_from_cloud()
             await self._async_ensure_connected()
             unlock_dp = self._get_unlock_dp()
             payload = self._build_unlock_payload(action_unlock=False)
@@ -300,6 +360,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     async def async_unlock(self) -> None:
         async with self._op_lock:
+            await self._async_refresh_check_code_from_cloud()
             await self._async_ensure_connected()
             unlock_dp = self._get_unlock_dp()
             payload = self._build_unlock_payload(action_unlock=True)

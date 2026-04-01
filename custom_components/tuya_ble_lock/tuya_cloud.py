@@ -12,6 +12,7 @@ import logging
 import os
 import time
 import uuid as uuid_mod
+import base64
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -185,6 +186,33 @@ class TuyaMobileAPIAsync:
             resp.raise_for_status()
             return await resp.json()
 
+    async def async_get_device_dps(self, gid: int | str, device_id: str) -> dict:
+        request_id = str(uuid_mod.uuid4())
+        t = str(int(time.time()))
+        params: dict[str, str] = {
+            "a": "tuya.m.device.dp.get",
+            "v": "2.0",
+            "clientId": DEFAULT_CLIENT_ID,
+            "deviceId": self.device_id,
+            "os": "Android",
+            "lang": "en",
+            "ttid": "tuyaSmart",
+            "appVersion": "7.2.8",
+            "sdkVersion": "3.29.5",
+            "time": t,
+            "requestId": request_id,
+            "gid": str(gid),
+            "postData": json.dumps({"devId": device_id}, separators=(",", ":")),
+        }
+        if self.sid:
+            params["sid"] = self.sid
+        params["sign"] = _sign(params, self._hmac_key)
+        url = self.base_url + "/api.json"
+        headers = {"User-Agent": "TuyaSmart/7.2.8 (Android)"}
+        async with self._session.get(url, params=params, headers=headers) as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
     async def async_find_device_by_mac(self, device_mac: str) -> dict | None:
         """Look up device info by MAC address via cloud API.
 
@@ -213,6 +241,33 @@ class TuyaMobileAPIAsync:
                         "localKey": dev.get("localKey", ""),
                         "name": dev.get("name", ""),
                         "productId": dev.get("productId", ""),
+                        "gid": gid,
+                    }
+        return None
+
+    async def async_find_device_by_dev_id(self, device_id: str) -> dict | None:
+        """Look up device info by devId so follow-up calls know the gid/home."""
+        homes_resp = await self.async_get_home_list()
+        homes_result = homes_resp.get("result", {})
+        if isinstance(homes_result, dict):
+            homes_result = homes_result.get("result", [])
+        for home in homes_result:
+            gid = home.get("groupId") or home.get("gid")
+            if not gid:
+                continue
+            devs_resp = await self.async_list_devices(gid)
+            devs_result = devs_resp.get("result", {})
+            if isinstance(devs_result, dict):
+                devs_result = devs_result.get("result", [])
+            for dev in devs_result:
+                if dev.get("devId") == device_id:
+                    return {
+                        "uuid": dev.get("uuid", ""),
+                        "devId": dev.get("devId", ""),
+                        "localKey": dev.get("localKey", ""),
+                        "name": dev.get("name", ""),
+                        "productId": dev.get("productId", ""),
+                        "gid": gid,
                     }
         return None
 
@@ -303,3 +358,46 @@ async def async_fetch_auth_key(
         "name": cloud_info.get("name", ""),
         "product_id": cloud_info.get("productId", ""),
     }
+
+
+async def async_fetch_check_code_dps(
+    hass: HomeAssistant,
+    email: str,
+    password: str,
+    country_code: str,
+    region: str,
+    device_id: str,
+    source_dps: tuple[int, ...] = (73, 71),
+) -> dict[int, bytes]:
+    """Fetch current RAW DP payloads for the lock's check-code DPs from Tuya cloud."""
+    session = async_get_clientsession(hass)
+    client = TuyaMobileAPIAsync(session, region=region)
+    login_resp = await client.async_login(country_code, email, password)
+    if not login_resp.get("success"):
+        error = login_resp.get("errorMsg", login_resp.get("msg", "Login failed"))
+        raise Exception(f"Tuya login failed: {error}")
+
+    device_info = await client.async_find_device_by_dev_id(device_id)
+    if not device_info or not device_info.get("gid"):
+        raise Exception(f"Could not resolve gid for device {device_id}")
+
+    dp_resp = await client.async_get_device_dps(device_info["gid"], device_id)
+    result = dp_resp.get("result", {})
+    if isinstance(result, dict) and "result" in result:
+        result = result["result"]
+    if not isinstance(result, dict):
+        raise Exception(f"Unexpected DP response: {dp_resp}")
+
+    raw_dps: dict[int, bytes] = {}
+    for dp_id in source_dps:
+        dp = result.get(str(dp_id))
+        if not isinstance(dp, dict):
+            continue
+        value = dp.get("value")
+        if not value or not isinstance(value, str):
+            continue
+        try:
+            raw_dps[int(dp_id)] = base64.b64decode(value)
+        except Exception:
+            _LOGGER.debug("Failed to decode base64 cloud DP %s value %r", dp_id, value, exc_info=True)
+    return raw_dps
