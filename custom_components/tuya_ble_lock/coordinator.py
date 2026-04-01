@@ -41,6 +41,15 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             name=f"Tuya BLE Lock {entry.title}",
             update_interval=timedelta(hours=12),
         )
+        status_sync_seconds = profile.get("status_sync_seconds")
+        if status_sync_seconds is not None:
+            try:
+                interval = timedelta(seconds=max(float(status_sync_seconds), 5.0))
+            except (TypeError, ValueError):
+                interval = timedelta(hours=12)
+            self.update_interval = interval
+            if hasattr(self, "_update_interval"):
+                self._update_interval = interval
         self._entry = entry
         self._session = session
         self._ble_device = ble_device
@@ -182,6 +191,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         """Connect to the lock and refresh all status DPs."""
         async with self._op_lock:
             try:
+                if not self._session.is_connected and await self._async_refresh_status_from_cloud():
+                    return self.state
                 await self._async_ensure_connected()
                 await self._fetch_status()
                 self._reset_idle_timer()
@@ -208,6 +219,18 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     def _lock_cfg(self) -> dict:
         return self._profile.get("entities", {}).get("lock", {})
+
+    def _status_sync_dps(self) -> tuple[int, ...]:
+        value = self._profile.get("status_sync_dps", ())
+        if isinstance(value, int):
+            return (value,)
+        result: list[int] = []
+        for dp_id in value:
+            try:
+                result.append(int(dp_id))
+            except (TypeError, ValueError):
+                continue
+        return tuple(dict.fromkeys(result))
 
     @staticmethod
     def _normalize_check_code(value: bytes | str | None) -> bytes | None:
@@ -330,6 +353,49 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 self._entry.title,
                 json.dumps(cloud_bundle.get("device_info", {}), sort_keys=True, default=str),
             )
+
+    async def _async_refresh_status_from_cloud(self) -> bool:
+        source_dps = self._status_sync_dps()
+        if not source_dps:
+            return False
+        options = self._entry.options
+        email = options.get(CONF_TUYA_EMAIL)
+        password = options.get(CONF_TUYA_PASSWORD)
+        country = options.get(CONF_TUYA_COUNTRY)
+        region = options.get(CONF_TUYA_REGION)
+        if not all((email, password, country, region)):
+            return False
+        device_id = self._device_id_from_virtual_id()
+        if not device_id:
+            return False
+        try:
+            cloud_bundle = await async_fetch_cloud_lock_bundle(
+                self.hass,
+                email=email,
+                password=password,
+                country_code=country,
+                region=region,
+                device_id=device_id,
+                source_dps=source_dps,
+            )
+        except Exception as exc:
+            _LOGGER.debug("Cloud status refresh failed for %s: %s", self._entry.title, exc, exc_info=True)
+            return False
+
+        cloud_dps = cloud_bundle["raw_dps"]
+        if not cloud_dps:
+            return False
+
+        self.raw_dps.update(cloud_dps)
+        self._process_dp_reports(
+            [{"id": dp_id, "raw": raw} for dp_id, raw in sorted(cloud_dps.items())]
+        )
+        _LOGGER.debug(
+            "Refreshed cloud status DPs for %s: %s",
+            self._entry.title,
+            [(dp_id, raw.hex()) for dp_id, raw in cloud_dps.items()],
+        )
+        return True
 
     def _cloud_check_payload(self) -> bytes | None:
         payload = self._cloud_check_payloads.get(71)

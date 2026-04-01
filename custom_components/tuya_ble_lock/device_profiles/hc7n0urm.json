@@ -3,10 +3,13 @@
   "name": "Raykube A1 Ultra-JM",
   "model": "A1 Ultra-JM",
   "category": "jtmspro",
+  "status_sync_seconds": 30,
+  "status_sync_dps": [47, 33],
   "entities": {
     "lock": {
       "unlock_dp": 71,
       "behavior": "momentary",
+      "motor_state_true_is_unlocked": true,
       "check_code": "49945663",
       "check_code_dp": [73, 71],
       "use_cloud_check_payload": true,

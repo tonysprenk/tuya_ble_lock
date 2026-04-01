@@ -27,6 +27,9 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         super().__init__(coordinator, entry)
         self._unlocking = False
         self._is_locked = True
+        runtime_data = getattr(entry, "runtime_data", None)
+        profile = getattr(runtime_data, "profile", {}) if runtime_data else {}
+        self._lock_cfg = profile.get("entities", {}).get("lock", {})
 
     @property
     def unique_id(self) -> str:
@@ -80,6 +83,9 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         - auto_lock=True (passage OFF) = lock is locked
         """
         motor = self.coordinator.state.get("motor_state")
+        if self._lock_cfg.get("motor_state_true_is_unlocked"):
+            if motor is True and self._is_locked:
+                self._is_locked = False
         if motor is False and not self._is_locked:
             self._is_locked = True
 
