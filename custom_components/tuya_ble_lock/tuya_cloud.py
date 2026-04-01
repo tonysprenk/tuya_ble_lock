@@ -70,11 +70,11 @@ def _sign(params: dict[str, str], hmac_key: str) -> str:
 class TuyaMobileAPIAsync:
     """Async Tuya mobile API client (a1.tuyaus.com/api.json)."""
 
-    def __init__(self, session, region: str = "us"):
+    def __init__(self, session, region: str = "us", device_id: str | None = None):
         self._session = session
         self._region = region
         self.base_url = MOBILE_REGIONS.get(region, MOBILE_REGIONS["us"])
-        self.device_id = os.urandom(32).hex()
+        self.device_id = device_id or os.urandom(32).hex()
 
         self.sid = ""
         self.ecode = ""
@@ -370,8 +370,11 @@ async def async_fetch_check_code_dps(
     source_dps: tuple[int, ...] = (73, 71),
 ) -> dict[int, bytes]:
     """Fetch current RAW DP payloads for the lock's check-code DPs from Tuya cloud."""
+    stable_device_id = hashlib.sha256(
+        f"tuya_ble_lock|{email}|{device_id}|{region}".encode()
+    ).hexdigest()
     session = async_get_clientsession(hass)
-    client = TuyaMobileAPIAsync(session, region=region)
+    client = TuyaMobileAPIAsync(session, region=region, device_id=stable_device_id)
     login_resp = await client.async_login(country_code, email, password)
     if not login_resp.get("success"):
         error = login_resp.get("errorMsg", login_resp.get("msg", "Login failed"))

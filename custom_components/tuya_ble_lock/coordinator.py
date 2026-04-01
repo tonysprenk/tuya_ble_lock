@@ -47,6 +47,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self._profile = profile
         self._idle_timer: asyncio.TimerHandle | None = None
         self._listener_task: asyncio.Task | None = None
+        self._cloud_check_payloads: dict[int, bytes] = {}
 
         # Build state dict from profile's state_map
         self.state: dict[str, Any] = {}
@@ -297,7 +298,14 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 self._entry.title,
                 [(dp_id, raw.hex()) for dp_id, raw in cloud_dps.items()],
             )
+            self._cloud_check_payloads.update(cloud_dps)
             self.raw_dps.update(cloud_dps)
+
+    def _cloud_check_payload(self) -> bytes | None:
+        payload = self._cloud_check_payloads.get(71)
+        if not payload or len(payload) != 19:
+            return None
+        return payload
 
     def _get_payload_version(self) -> int:
         value = self._lock_cfg().get("payload_version", 1)
@@ -326,6 +334,13 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
           [4B BE]       Unix timestamp
           [00 00]       padding
         """
+        if self._lock_cfg().get("use_cloud_check_payload"):
+            cloud_payload = self._cloud_check_payload()
+            if cloud_payload:
+                payload = bytearray(cloud_payload)
+                payload[12] = 0x01 if action_unlock else 0x00
+                return bytes(payload)
+
         code = self._get_check_code()
         ts = int(time.time())
         payload = struct.pack(">HH", self._get_payload_version(), self._get_member_id())

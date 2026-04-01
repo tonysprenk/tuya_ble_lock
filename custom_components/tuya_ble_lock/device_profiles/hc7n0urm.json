@@ -8,7 +8,8 @@
       "unlock_dp": 71,
       "behavior": "momentary",
       "check_code": "49945663",
-      "check_code_dp": [73, 71]
+      "check_code_dp": [73, 71],
+      "use_cloud_check_payload": true
     },
     "battery_sensor": {
       "dp": [9]
