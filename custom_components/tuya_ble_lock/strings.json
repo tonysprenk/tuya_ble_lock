@@ -60,6 +60,16 @@
       "confirm": {
         "title": "Confirm Setup",
         "description": "Ready to set up {name} ({mac})."
+      },
+      "reauth": {
+        "title": "Update Tuya Cloud Credentials",
+        "description": "Enter your current Tuya Smart or Smart Life app credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "country_code": "Country code",
+          "region": "Cloud region"
+        }
       }
     },
     "error": {
@@ -70,7 +80,9 @@
       "no_uuid": "Could not determine device UUID from BLE advertisement. Try cloud setup or paste auth key manually."
     },
     "abort": {
-      "already_configured": "This lock is already configured."
+      "already_configured": "This lock is already configured.",
+      "reauth_successful": "Tuya cloud credentials were updated.",
+      "reauth_failed": "Could not find the existing lock entry to update."
     }
   },
   "entity": {

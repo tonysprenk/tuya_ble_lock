@@ -405,4 +405,64 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_reauth(self, user_input=None):
-        return await self.async_step_cloud_login()
+        """Update Tuya cloud credentials on an existing config entry."""
+        entry_id = self.context.get("entry_id")
+        entry = self.hass.config_entries.async_get_entry(entry_id) if entry_id else None
+        if entry is None:
+            return self.async_abort(reason="reauth_failed")
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reauth",
+                data_schema=STEP_CLOUD_SCHEMA,
+            )
+
+        email = user_input[CONF_EMAIL]
+        password = user_input[CONF_PASSWORD]
+        country = user_input["country_code"]
+        region = user_input["region"]
+        data = dict(entry.data)
+
+        try:
+            cloud_result = await async_fetch_auth_key(
+                self.hass,
+                data.get(CONF_DEVICE_UUID, ""),
+                email,
+                password,
+                country,
+                region,
+                device_mac=data.get(CONF_DEVICE_MAC, ""),
+            )
+        except Exception:
+            _LOGGER.exception("Reauth Tuya credential validation failed")
+            return self.async_show_form(
+                step_id="reauth",
+                data_schema=STEP_CLOUD_SCHEMA,
+                errors={"base": "invalid_credentials"},
+            )
+
+        if cloud_result.get("auth_key"):
+            data[CONF_AUTH_KEY] = cloud_result["auth_key"]
+        if cloud_result.get("uuid"):
+            data[CONF_DEVICE_UUID] = cloud_result["uuid"]
+        if cloud_result.get("product_id"):
+            data[CONF_PRODUCT_ID] = cloud_result["product_id"]
+        if cloud_result.get("local_key") and cloud_result.get("device_id"):
+            login_key = cloud_result["local_key"][:6].encode()
+            virtual_id = cloud_result["device_id"].encode()
+            virtual_id = (virtual_id + b"\x00" * 22)[:22]
+            data[CONF_LOGIN_KEY] = login_key.hex()
+            data[CONF_VIRTUAL_ID] = virtual_id.hex()
+
+        options = dict(entry.options)
+        options.update(
+            {
+                CONF_TUYA_EMAIL: email,
+                CONF_TUYA_PASSWORD: password,
+                CONF_TUYA_COUNTRY: country,
+                CONF_TUYA_REGION: region,
+            }
+        )
+        self.hass.config_entries.async_update_entry(entry, data=data, options=options)
+        await self.hass.config_entries.async_reload(entry.entry_id)
+        return self.async_abort(reason="reauth_successful")

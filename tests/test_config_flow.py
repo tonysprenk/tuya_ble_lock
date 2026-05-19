@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import asyncio
+import importlib
+import sys
+import types
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+
+INTEGRATION_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "tuya_ble_lock"
+
+
+class FakeConfigFlow:
+    def __init_subclass__(cls, **kwargs):
+        return super().__init_subclass__()
+
+    def async_show_form(self, **kwargs):
+        return {"type": "form", **kwargs}
+
+    def async_create_entry(self, **kwargs):
+        return {"type": "create_entry", **kwargs}
+
+    def async_abort(self, **kwargs):
+        return {"type": "abort", **kwargs}
+
+
+class FakeConfigEntries:
+    def __init__(self, entry):
+        self.entry = entry
+        self.reloads = []
+        self.updated_data = None
+        self.updated_options = None
+
+    def async_get_entry(self, entry_id):
+        if entry_id == self.entry.entry_id:
+            return self.entry
+        return None
+
+    def async_update_entry(self, entry, *, data=None, options=None):
+        if data is not None:
+            entry.data = data
+            self.updated_data = data
+        if options is not None:
+            entry.options = options
+            self.updated_options = options
+
+    async def async_reload(self, entry_id):
+        self.reloads.append(entry_id)
+
+
+class FakeHass:
+    def __init__(self, entry):
+        self.config_entries = FakeConfigEntries(entry)
+
+
+def install_config_flow_stubs() -> None:
+    custom_components = sys.modules.get("custom_components") or types.ModuleType("custom_components")
+    tuya_ble_lock = sys.modules.get("custom_components.tuya_ble_lock") or types.ModuleType(
+        "custom_components.tuya_ble_lock"
+    )
+    tuya_ble_lock.__path__ = [str(INTEGRATION_DIR)]
+
+    voluptuous = types.ModuleType("voluptuous")
+    voluptuous.Schema = lambda value: value
+    voluptuous.Required = lambda key, *args, **kwargs: key
+    voluptuous.In = lambda value: value
+
+    homeassistant = sys.modules.get("homeassistant") or types.ModuleType("homeassistant")
+    config_entries = types.ModuleType("homeassistant.config_entries")
+    config_entries.ConfigFlow = FakeConfigFlow
+
+    const = types.ModuleType("homeassistant.const")
+    const.CONF_EMAIL = "email"
+    const.CONF_PASSWORD = "password"
+
+    core = types.ModuleType("homeassistant.core")
+    core.HomeAssistant = object
+
+    exceptions = types.ModuleType("homeassistant.exceptions")
+    exceptions.HomeAssistantError = RuntimeError
+
+    components = types.ModuleType("homeassistant.components")
+    bluetooth = types.ModuleType("homeassistant.components.bluetooth")
+    bluetooth.async_ble_device_from_address = lambda *args, **kwargs: None
+    bluetooth.async_last_service_info = lambda *args, **kwargs: None
+
+    tuya_cloud = types.ModuleType("custom_components.tuya_ble_lock.tuya_cloud")
+
+    async def async_fetch_auth_key(*args, **kwargs):
+        raise AssertionError("test should patch async_fetch_auth_key")
+
+    async def async_fetch_auth_key_only(*args, **kwargs):
+        raise AssertionError("test should not call async_fetch_auth_key_only")
+
+    tuya_cloud.async_fetch_auth_key = async_fetch_auth_key
+    tuya_cloud.async_fetch_auth_key_only = async_fetch_auth_key_only
+
+    sys.modules.update(
+        {
+            "custom_components": custom_components,
+            "custom_components.tuya_ble_lock": tuya_ble_lock,
+            "voluptuous": voluptuous,
+            "homeassistant": homeassistant,
+            "homeassistant.config_entries": config_entries,
+            "homeassistant.const": const,
+            "homeassistant.core": core,
+            "homeassistant.exceptions": exceptions,
+            "homeassistant.components": components,
+            "homeassistant.components.bluetooth": bluetooth,
+            "custom_components.tuya_ble_lock.tuya_cloud": tuya_cloud,
+        }
+    )
+
+
+class TuyaBLELockConfigFlowTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_config_flow_stubs()
+        sys.modules.pop("custom_components.tuya_ble_lock.config_flow", None)
+        cls.config_flow_module = importlib.import_module("custom_components.tuya_ble_lock.config_flow")
+
+    def test_reauth_updates_existing_entry_options_and_reloads(self):
+        async def scenario():
+            module = self.config_flow_module
+            entry = SimpleNamespace(
+                entry_id="entry-1",
+                title="TY",
+                data={
+                    module.CONF_DEVICE_MAC: "DC:23:51:D9:8B:86",
+                    module.CONF_DEVICE_UUID: "old-uuid",
+                    module.CONF_LOGIN_KEY: "old-login",
+                    module.CONF_VIRTUAL_ID: "old-virtual",
+                    module.CONF_AUTH_KEY: "old-auth",
+                    module.CONF_PRODUCT_ID: "old-product",
+                },
+                options={
+                    module.CONF_TUYA_EMAIL: "old@example.com",
+                    module.CONF_TUYA_PASSWORD: "old-password",
+                    module.CONF_TUYA_COUNTRY: "1",
+                    module.CONF_TUYA_REGION: "us",
+                },
+            )
+            flow = module.TuyaBLELockConfigFlow()
+            flow.hass = FakeHass(entry)
+            flow.context = {"entry_id": entry.entry_id, "source": "reauth"}
+
+            async def fake_fetch_auth_key(*args, **kwargs):
+                return {
+                    "auth_key": "new-auth",
+                    "local_key": "abcdef1234567890",
+                    "device_id": "new-device-id",
+                    "product_id": "hc7n0urm",
+                    "uuid": "new-uuid",
+                }
+
+            module.async_fetch_auth_key = fake_fetch_auth_key
+
+            result = await flow.async_step_reauth(
+                {
+                    "email": "new@example.com",
+                    "password": "new-password",
+                    "country_code": "31",
+                    "region": "eu",
+                }
+            )
+
+            self.assertEqual(result, {"type": "abort", "reason": "reauth_successful"})
+            self.assertEqual(flow.hass.config_entries.reloads, [entry.entry_id])
+            self.assertEqual(entry.options[module.CONF_TUYA_EMAIL], "new@example.com")
+            self.assertEqual(entry.options[module.CONF_TUYA_PASSWORD], "new-password")
+            self.assertEqual(entry.options[module.CONF_TUYA_COUNTRY], "31")
+            self.assertEqual(entry.options[module.CONF_TUYA_REGION], "eu")
+            self.assertEqual(entry.data[module.CONF_AUTH_KEY], "new-auth")
+            self.assertEqual(entry.data[module.CONF_PRODUCT_ID], "hc7n0urm")
+            self.assertEqual(entry.data[module.CONF_DEVICE_UUID], "new-uuid")
+            self.assertEqual(entry.data[module.CONF_LOGIN_KEY], b"abcdef".hex())
+            self.assertEqual(entry.data[module.CONF_VIRTUAL_ID], (b"new-device-id" + b"\x00" * 22)[:22].hex())
+
+        asyncio.run(scenario())
+
+
+if __name__ == "__main__":
+    unittest.main()
