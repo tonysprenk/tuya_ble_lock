@@ -202,8 +202,16 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("Poll error: %s", exc)
         return self.state
 
+    def _session_ready(self) -> bool:
+        is_ready = getattr(self._session, "is_ready", None)
+        if is_ready is not None:
+            return bool(is_ready)
+        return bool(getattr(self._session, "is_connected", False))
+
     async def _async_ensure_connected(self) -> None:
-        if not self._session.is_connected:
+        if not self._session_ready():
+            if getattr(self._session, "is_connected", False):
+                await self._session.async_disconnect()
             if not await self._session.async_connect():
                 raise UpdateFailed("BLE connection to lock failed")
 
@@ -546,7 +554,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             await self._session.async_send_dp_fire_and_forget(unlock_dp, 0, payload)
         except Exception as exc:
             _LOGGER.warning("%s command failed, reconnecting: %s", action_name.capitalize(), exc)
-            self._session.is_connected = False
+            await self._session.async_disconnect()
             await self._async_ensure_connected()
             payload = self._build_unlock_payload(action_unlock=action_unlock)
             await self._session.async_send_dp_fire_and_forget(unlock_dp, 0, payload)

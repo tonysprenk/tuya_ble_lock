@@ -85,6 +85,16 @@ class TuyaBLELockSession:
         self._write_char = None
         self._notify_char = None
 
+    @property
+    def is_ready(self) -> bool:
+        """Return True only when both session state and Bleak client are connected."""
+        if not self.is_connected or not self._client:
+            return False
+        try:
+            return bool(self._client.is_connected)
+        except Exception:
+            return False
+
     def _resolve_gatt_uuids(self) -> tuple[str | None, str | None]:
         """Find write and notify characteristic UUIDs from discovered services.
 
@@ -188,6 +198,10 @@ class TuyaBLELockSession:
 
     async def _send_encrypted(self, cmd: int, data: bytes, sec_flag: int, ack_sn: int = 0):
         """Build encrypted fragments and write via GATT."""
+        if not self._client or not self.is_ready:
+            self.is_connected = False
+            raise BleakError("BLE client is not connected")
+
         key = self._keys.get(sec_flag)
         if sec_flag != SEC_NONE and not key:
             raise RuntimeError(
@@ -346,8 +360,11 @@ class TuyaBLELockSession:
             return await self._async_connect_inner()
 
     async def _async_connect_inner(self, max_attempts: int = 3) -> bool:
-        if self.is_connected:
+        if self.is_ready:
             return True
+        if self.is_connected:
+            _LOGGER.debug("Stored BLE connection for %s is stale, reconnecting", self._ble_device.address)
+            self.is_connected = False
 
         mtu_data = struct.pack(">H", 20)
         srand = None

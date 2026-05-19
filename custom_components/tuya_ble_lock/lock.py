@@ -7,11 +7,18 @@ via RestoreEntity.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from homeassistant.components.lock import LockEntity
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import TuyaBLELockEntity
 from .models import TuyaBLELockData
+
+_LOGGER = logging.getLogger(__name__)
+
+LOCK_COMMAND_TIMEOUT_SECONDS = 45
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -25,6 +32,7 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
 
     def __init__(self, coordinator, entry) -> None:
         super().__init__(coordinator, entry)
+        self._locking = False
         self._unlocking = False
         self._is_locked = True
         runtime_data = getattr(entry, "runtime_data", None)
@@ -45,7 +53,7 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
 
     @property
     def is_locking(self) -> bool:
-        return False
+        return self._locking
 
     @property
     def is_unlocking(self) -> bool:
@@ -58,17 +66,38 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
             self._is_locked = last.state == "locked"
 
     async def async_lock(self, **kwargs) -> None:
-        await self.coordinator.async_lock()
-        self._is_locked = True
+        self._locking = True
         self.async_write_ha_state()
+        try:
+            await asyncio.wait_for(
+                self.coordinator.async_lock(),
+                timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Timed out locking %s after %ds", self._mac, LOCK_COMMAND_TIMEOUT_SECONDS)
+            raise
+        else:
+            self._is_locked = True
+        finally:
+            self._locking = False
+            self.async_write_ha_state()
 
     async def async_unlock(self, **kwargs) -> None:
         self._unlocking = True
         self.async_write_ha_state()
-        await self.coordinator.async_unlock()
-        self._unlocking = False
-        self._is_locked = False
-        self.async_write_ha_state()
+        try:
+            await asyncio.wait_for(
+                self.coordinator.async_unlock(),
+                timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Timed out unlocking %s after %ds", self._mac, LOCK_COMMAND_TIMEOUT_SECONDS)
+            raise
+        else:
+            self._is_locked = False
+        finally:
+            self._unlocking = False
+            self.async_write_ha_state()
 
     def _handle_coordinator_update(self) -> None:
         """React to DP pushes for lock state.
