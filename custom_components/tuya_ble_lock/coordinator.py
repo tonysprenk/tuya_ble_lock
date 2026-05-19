@@ -309,10 +309,20 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         country = options.get(CONF_TUYA_COUNTRY)
         region = options.get(CONF_TUYA_REGION)
         if not all((email, password, country, region)):
+            if force:
+                _LOGGER.warning(
+                    "Cannot refresh Tuya cloud check code for %s: cloud credentials are missing",
+                    self._entry.title,
+                )
             return
 
         device_id = self._device_id_from_virtual_id()
         if not device_id:
+            if force:
+                _LOGGER.warning(
+                    "Cannot refresh Tuya cloud check code for %s: device id is missing",
+                    self._entry.title,
+                )
             return
 
         source_dps = self._lock_cfg().get("check_code_dp", DEFAULT_CHECK_CODE_SOURCE_DPS)
@@ -335,7 +345,14 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 source_dps=source_dps,
             )
         except Exception as exc:
-            _LOGGER.debug("Cloud check-code refresh failed for %s: %s", self._entry.title, exc, exc_info=True)
+            if force:
+                _LOGGER.warning(
+                    "Cloud check-code refresh failed for %s: %s",
+                    self._entry.title,
+                    exc,
+                )
+            else:
+                _LOGGER.debug("Cloud check-code refresh failed for %s: %s", self._entry.title, exc, exc_info=True)
             return
 
         cloud_dps = cloud_bundle["raw_dps"]
@@ -545,8 +562,21 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             return None
         return raw[-1]
 
+    def _lock_success_result_codes(self) -> tuple[int, ...]:
+        value = self._lock_cfg().get("success_result_codes", (0,))
+        if isinstance(value, int):
+            return (value,)
+        result: list[int] = []
+        for code in value:
+            try:
+                result.append(int(code))
+            except (TypeError, ValueError):
+                continue
+        return tuple(dict.fromkeys(result)) or (0,)
+
     async def _async_send_lock_action(self, *, action_unlock: bool, allow_retry: bool) -> None:
         unlock_dp = self._get_unlock_dp()
+        self.raw_dps.pop(unlock_dp, None)
         payload = self._build_unlock_payload(action_unlock=action_unlock)
         action_name = "unlock" if action_unlock else "lock"
         _LOGGER.debug("Sending %s command (DP %d RAW, %d bytes): %s", action_name, unlock_dp, len(payload), payload.hex())
@@ -561,7 +591,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
         await self._fetch_status()
         result_code = self._dp_result_code(unlock_dp)
-        if allow_retry and result_code not in (None, 0):
+        success_codes = self._lock_success_result_codes()
+        if allow_retry and result_code not in (None, *success_codes):
             _LOGGER.warning(
                 "DP%d returned result=%d after %s, forcing cloud refresh and retrying once",
                 unlock_dp,
@@ -572,6 +603,12 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             await self._async_pair_central_from_cloud()
             await self._async_send_lock_action(action_unlock=action_unlock, allow_retry=False)
             return
+
+        if result_code not in (None, *success_codes):
+            raise UpdateFailed(
+                f"DP{unlock_dp} returned result={result_code} after {action_name}; "
+                "lock rejected the command"
+            )
 
         self.async_set_updated_data(self.state)
         self._reset_idle_timer()

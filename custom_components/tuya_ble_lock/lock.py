@@ -11,6 +11,7 @@ import asyncio
 import logging
 
 from homeassistant.components.lock import LockEntity
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import TuyaBLELockEntity
@@ -34,6 +35,7 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         super().__init__(coordinator, entry)
         self._locking = False
         self._unlocking = False
+        self._command_task: asyncio.Task | None = None
         self._is_locked = True
         runtime_data = getattr(entry, "runtime_data", None)
         profile = getattr(runtime_data, "profile", {}) if runtime_data else {}
@@ -65,39 +67,60 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         if last and last.state in ("locked", "unlocked"):
             self._is_locked = last.state == "locked"
 
+    def _command_in_progress(self) -> bool:
+        return self._command_task is not None and not self._command_task.done()
+
+    def _start_command_task(self, coro, name: str) -> asyncio.Task:
+        hass = getattr(self, "hass", None)
+        if hass is not None:
+            return hass.async_create_task(coro, name=name)
+        return asyncio.create_task(coro, name=name)
+
+    async def _async_run_command(self, action_name: str, command, target_locked: bool) -> None:
+        try:
+            await asyncio.wait_for(
+                command(),
+                timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "Timed out %s %s after %ds",
+                action_name,
+                self._mac,
+                LOCK_COMMAND_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            _LOGGER.warning("Failed to %s %s: %s", action_name, self._mac, exc)
+        else:
+            self._is_locked = target_locked
+        finally:
+            if action_name == "lock":
+                self._locking = False
+            else:
+                self._unlocking = False
+            self.async_write_ha_state()
+            if self._command_task is asyncio.current_task():
+                self._command_task = None
+
     async def async_lock(self, **kwargs) -> None:
+        if self._command_in_progress():
+            raise HomeAssistantError("A Tuya BLE lock command is already in progress")
         self._locking = True
         self.async_write_ha_state()
-        try:
-            await asyncio.wait_for(
-                self.coordinator.async_lock(),
-                timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            _LOGGER.warning("Timed out locking %s after %ds", self._mac, LOCK_COMMAND_TIMEOUT_SECONDS)
-            raise
-        else:
-            self._is_locked = True
-        finally:
-            self._locking = False
-            self.async_write_ha_state()
+        self._command_task = self._start_command_task(
+            self._async_run_command("lock", self.coordinator.async_lock, True),
+            f"tuya_ble_lock_lock_{self._mac}",
+        )
 
     async def async_unlock(self, **kwargs) -> None:
+        if self._command_in_progress():
+            raise HomeAssistantError("A Tuya BLE lock command is already in progress")
         self._unlocking = True
         self.async_write_ha_state()
-        try:
-            await asyncio.wait_for(
-                self.coordinator.async_unlock(),
-                timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            _LOGGER.warning("Timed out unlocking %s after %ds", self._mac, LOCK_COMMAND_TIMEOUT_SECONDS)
-            raise
-        else:
-            self._is_locked = False
-        finally:
-            self._unlocking = False
-            self.async_write_ha_state()
+        self._command_task = self._start_command_task(
+            self._async_run_command("unlock", self.coordinator.async_unlock, False),
+            f"tuya_ble_lock_unlock_{self._mac}",
+        )
 
     def _handle_coordinator_update(self) -> None:
         """React to DP pushes for lock state.

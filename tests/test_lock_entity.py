@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import sys
 import types
 import unittest
@@ -36,6 +37,15 @@ class FakeLockEntity(FakeEntityBase):
     pass
 
 
+class FakeHomeAssistantError(Exception):
+    pass
+
+
+class FakeHass:
+    def async_create_task(self, coro, name=None):
+        return asyncio.create_task(coro, name=name)
+
+
 class FakeRestoreEntity(FakeEntityBase):
     async def async_get_last_state(self):
         return None
@@ -55,6 +65,9 @@ def install_homeassistant_stubs() -> None:
     restore_state = types.ModuleType("homeassistant.helpers.restore_state")
     restore_state.RestoreEntity = FakeRestoreEntity
 
+    exceptions = types.ModuleType("homeassistant.exceptions")
+    exceptions.HomeAssistantError = FakeHomeAssistantError
+
     device_registry = types.ModuleType("homeassistant.helpers.device_registry")
     device_registry.CONNECTION_BLUETOOTH = "bluetooth"
 
@@ -71,6 +84,7 @@ def install_homeassistant_stubs() -> None:
             "homeassistant": ha,
             "homeassistant.components": components,
             "homeassistant.components.lock": lock_mod,
+            "homeassistant.exceptions": exceptions,
             "homeassistant.helpers": helpers,
             "homeassistant.helpers.restore_state": restore_state,
             "homeassistant.helpers.device_registry": device_registry,
@@ -80,62 +94,128 @@ def install_homeassistant_stubs() -> None:
     )
 
 
-class FailingCoordinator:
+class ControlledCoordinator:
     def __init__(self):
         self.state = {}
-        self.lock_observer = None
-        self.unlock_observer = None
+        self.lock_started = asyncio.Event()
+        self.unlock_started = asyncio.Event()
+        self.finish_lock = asyncio.Event()
+        self.finish_unlock = asyncio.Event()
+        self.lock_error = None
+        self.unlock_error = None
 
     async def async_lock(self):
-        if self.lock_observer:
-            self.lock_observer()
-        raise RuntimeError("lock command failed")
+        self.lock_started.set()
+        await self.finish_lock.wait()
+        if self.lock_error:
+            raise self.lock_error
 
     async def async_unlock(self):
-        if self.unlock_observer:
-            self.unlock_observer()
-        raise RuntimeError("unlock command failed")
+        self.unlock_started.set()
+        await self.finish_unlock.wait()
+        if self.unlock_error:
+            raise self.unlock_error
 
 
 class TuyaBLELockEntityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         install_homeassistant_stubs()
+        sys.modules.pop("custom_components.tuya_ble_lock.lock", None)
         cls.lock_module = importlib.import_module("custom_components.tuya_ble_lock.lock")
 
     def make_entity(self):
-        coordinator = FailingCoordinator()
+        coordinator = ControlledCoordinator()
         entry = SimpleNamespace(
             data={"device_mac": "DC:23:51:D9:8B:86"},
             runtime_data=SimpleNamespace(profile={}),
         )
         entity = self.lock_module.TuyaBLELock(coordinator, entry)
+        entity.hass = FakeHass()
         return entity, coordinator
 
-    def test_unlock_failure_clears_unlocking_state(self):
-        entity, coordinator = self.make_entity()
-        observed_unlocking = []
-        coordinator.unlock_observer = lambda: observed_unlocking.append(entity.is_unlocking)
+    def test_unlock_returns_before_ble_command_finishes(self):
+        async def scenario():
+            entity, coordinator = self.make_entity()
 
-        with self.assertRaises(RuntimeError):
-            asyncio.run(entity.async_unlock())
+            await asyncio.wait_for(entity.async_unlock(), timeout=0.05)
 
-        self.assertEqual(observed_unlocking, [True])
-        self.assertFalse(entity.is_unlocking)
-        self.assertTrue(entity.is_locked)
+            self.assertTrue(entity.is_unlocking)
+            self.assertTrue(entity.is_locked)
+            self.assertIsNotNone(entity._command_task)
+            task = entity._command_task
 
-    def test_lock_failure_clears_locking_state(self):
-        entity, coordinator = self.make_entity()
-        entity._is_locked = False
-        observed_locking = []
-        coordinator.lock_observer = lambda: observed_locking.append(entity.is_locking)
+            await asyncio.wait_for(coordinator.unlock_started.wait(), timeout=0.05)
+            coordinator.finish_unlock.set()
+            await asyncio.wait_for(task, timeout=0.2)
 
-        with self.assertRaises(RuntimeError):
-            asyncio.run(entity.async_lock())
+            self.assertFalse(entity.is_unlocking)
+            self.assertFalse(entity.is_locked)
 
-        self.assertEqual(observed_locking, [True])
-        self.assertFalse(entity.is_locking)
-        self.assertFalse(entity.is_locked)
+        asyncio.run(scenario())
+
+    def test_unlock_failure_clears_unlocking_state_without_changing_lock_state(self):
+        async def scenario():
+            entity, coordinator = self.make_entity()
+            coordinator.unlock_error = RuntimeError("unlock command failed")
+
+            await asyncio.wait_for(entity.async_unlock(), timeout=0.05)
+            self.assertTrue(entity.is_unlocking)
+            task = entity._command_task
+
+            await asyncio.wait_for(coordinator.unlock_started.wait(), timeout=0.05)
+            coordinator.finish_unlock.set()
+            previous_disable_level = logging.root.manager.disable
+            logging.disable(logging.CRITICAL)
+            try:
+                await asyncio.wait_for(task, timeout=0.2)
+            finally:
+                logging.disable(previous_disable_level)
+
+            self.assertFalse(entity.is_unlocking)
+            self.assertTrue(entity.is_locked)
+
+        asyncio.run(scenario())
+
+    def test_lock_failure_clears_locking_state_without_changing_lock_state(self):
+        async def scenario():
+            entity, coordinator = self.make_entity()
+            entity._is_locked = False
+            coordinator.lock_error = RuntimeError("lock command failed")
+
+            await asyncio.wait_for(entity.async_lock(), timeout=0.05)
+            self.assertTrue(entity.is_locking)
+            task = entity._command_task
+
+            await asyncio.wait_for(coordinator.lock_started.wait(), timeout=0.05)
+            coordinator.finish_lock.set()
+            previous_disable_level = logging.root.manager.disable
+            logging.disable(logging.CRITICAL)
+            try:
+                await asyncio.wait_for(task, timeout=0.2)
+            finally:
+                logging.disable(previous_disable_level)
+
+            self.assertFalse(entity.is_locking)
+            self.assertFalse(entity.is_locked)
+
+        asyncio.run(scenario())
+
+    def test_rejects_overlapping_lock_commands(self):
+        async def scenario():
+            entity, coordinator = self.make_entity()
+
+            await asyncio.wait_for(entity.async_unlock(), timeout=0.05)
+            task = entity._command_task
+            await asyncio.wait_for(coordinator.unlock_started.wait(), timeout=0.05)
+
+            with self.assertRaises(FakeHomeAssistantError):
+                await entity.async_lock()
+
+            coordinator.finish_unlock.set()
+            await asyncio.wait_for(task, timeout=0.2)
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":
