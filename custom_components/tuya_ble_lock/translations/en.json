@@ -70,6 +70,16 @@
           "country_code": "Country code",
           "region": "Cloud region"
         }
+      },
+      "reconfigure": {
+        "title": "Update Tuya Cloud Credentials",
+        "description": "Enter your current Tuya Smart or Smart Life app credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "country_code": "Country code",
+          "region": "Cloud region"
+        }
       }
     },
     "error": {
@@ -82,7 +92,9 @@
     "abort": {
       "already_configured": "This lock is already configured.",
       "reauth_successful": "Tuya cloud credentials were updated.",
-      "reauth_failed": "Could not find the existing lock entry to update."
+      "reauth_failed": "Could not find the existing lock entry to update.",
+      "reconfigure_successful": "Tuya cloud credentials were updated.",
+      "reconfigure_failed": "Could not find the existing lock entry to update."
     }
   },
   "entity": {

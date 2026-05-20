@@ -404,18 +404,18 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"name": self._name, "mac": self._mac},
         )
 
-    async def async_step_reauth(self, user_input=None):
-        """Update Tuya cloud credentials on an existing config entry."""
+    async def _async_update_cloud_credentials(
+        self,
+        *,
+        user_input: dict,
+        form_step_id: str,
+        success_reason: str,
+        failed_reason: str,
+    ):
         entry_id = self.context.get("entry_id")
         entry = self.hass.config_entries.async_get_entry(entry_id) if entry_id else None
         if entry is None:
-            return self.async_abort(reason="reauth_failed")
-
-        if user_input is None:
-            return self.async_show_form(
-                step_id="reauth",
-                data_schema=STEP_CLOUD_SCHEMA,
-            )
+            return self.async_abort(reason=failed_reason)
 
         email = user_input[CONF_EMAIL]
         password = user_input[CONF_PASSWORD]
@@ -436,7 +436,7 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception:
             _LOGGER.exception("Reauth Tuya credential validation failed")
             return self.async_show_form(
-                step_id="reauth",
+                step_id=form_step_id,
                 data_schema=STEP_CLOUD_SCHEMA,
                 errors={"base": "invalid_credentials"},
             )
@@ -465,4 +465,44 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         self.hass.config_entries.async_update_entry(entry, data=data, options=options)
         await self.hass.config_entries.async_reload(entry.entry_id)
-        return self.async_abort(reason="reauth_successful")
+        return self.async_abort(reason=success_reason)
+
+    async def async_step_reauth(self, user_input=None):
+        """Update Tuya cloud credentials on an existing config entry."""
+        entry_id = self.context.get("entry_id")
+        entry = self.hass.config_entries.async_get_entry(entry_id) if entry_id else None
+        if entry is None:
+            return self.async_abort(reason="reauth_failed")
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reauth",
+                data_schema=STEP_CLOUD_SCHEMA,
+            )
+
+        return await self._async_update_cloud_credentials(
+            user_input=user_input,
+            form_step_id="reauth",
+            success_reason="reauth_successful",
+            failed_reason="reauth_failed",
+        )
+
+    async def async_step_reconfigure(self, user_input=None):
+        """Expose a UI flow for updating Tuya cloud credentials."""
+        entry_id = self.context.get("entry_id")
+        entry = self.hass.config_entries.async_get_entry(entry_id) if entry_id else None
+        if entry is None:
+            return self.async_abort(reason="reconfigure_failed")
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=STEP_CLOUD_SCHEMA,
+            )
+
+        return await self._async_update_cloud_credentials(
+            user_input=user_input,
+            form_step_id="reconfigure",
+            success_reason="reconfigure_successful",
+            failed_reason="reconfigure_failed",
+        )

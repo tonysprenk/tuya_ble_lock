@@ -121,62 +121,97 @@ class TuyaBLELockConfigFlowTest(unittest.TestCase):
         sys.modules.pop("custom_components.tuya_ble_lock.config_flow", None)
         cls.config_flow_module = importlib.import_module("custom_components.tuya_ble_lock.config_flow")
 
+    def make_flow(self, source="reauth"):
+        module = self.config_flow_module
+        entry = SimpleNamespace(
+            entry_id="entry-1",
+            title="TY",
+            data={
+                module.CONF_DEVICE_MAC: "DC:23:51:D9:8B:86",
+                module.CONF_DEVICE_UUID: "old-uuid",
+                module.CONF_LOGIN_KEY: "old-login",
+                module.CONF_VIRTUAL_ID: "old-virtual",
+                module.CONF_AUTH_KEY: "old-auth",
+                module.CONF_PRODUCT_ID: "old-product",
+            },
+            options={
+                module.CONF_TUYA_EMAIL: "old@example.com",
+                module.CONF_TUYA_PASSWORD: "old-password",
+                module.CONF_TUYA_COUNTRY: "1",
+                module.CONF_TUYA_REGION: "us",
+            },
+        )
+        flow = module.TuyaBLELockConfigFlow()
+        flow.hass = FakeHass(entry)
+        flow.context = {"entry_id": entry.entry_id, "source": source}
+        return flow, entry
+
+    def install_successful_cloud_response(self):
+        async def fake_fetch_auth_key(*args, **kwargs):
+            return {
+                "auth_key": "new-auth",
+                "local_key": "abcdef1234567890",
+                "device_id": "new-device-id",
+                "product_id": "hc7n0urm",
+                "uuid": "new-uuid",
+            }
+
+        self.config_flow_module.async_fetch_auth_key = fake_fetch_auth_key
+
+    def assert_credentials_updated(self, flow, entry):
+        module = self.config_flow_module
+        self.assertEqual(flow.hass.config_entries.reloads, [entry.entry_id])
+        self.assertEqual(entry.options[module.CONF_TUYA_EMAIL], "new@example.com")
+        self.assertEqual(entry.options[module.CONF_TUYA_PASSWORD], "new-password")
+        self.assertEqual(entry.options[module.CONF_TUYA_COUNTRY], "31")
+        self.assertEqual(entry.options[module.CONF_TUYA_REGION], "eu")
+        self.assertEqual(entry.data[module.CONF_AUTH_KEY], "new-auth")
+        self.assertEqual(entry.data[module.CONF_PRODUCT_ID], "hc7n0urm")
+        self.assertEqual(entry.data[module.CONF_DEVICE_UUID], "new-uuid")
+        self.assertEqual(entry.data[module.CONF_LOGIN_KEY], b"abcdef".hex())
+        self.assertEqual(entry.data[module.CONF_VIRTUAL_ID], (b"new-device-id" + b"\x00" * 22)[:22].hex())
+
+    def cloud_credentials_input(self):
+        return {
+            "email": "new@example.com",
+            "password": "new-password",
+            "country_code": "31",
+            "region": "eu",
+        }
+
     def test_reauth_updates_existing_entry_options_and_reloads(self):
         async def scenario():
-            module = self.config_flow_module
-            entry = SimpleNamespace(
-                entry_id="entry-1",
-                title="TY",
-                data={
-                    module.CONF_DEVICE_MAC: "DC:23:51:D9:8B:86",
-                    module.CONF_DEVICE_UUID: "old-uuid",
-                    module.CONF_LOGIN_KEY: "old-login",
-                    module.CONF_VIRTUAL_ID: "old-virtual",
-                    module.CONF_AUTH_KEY: "old-auth",
-                    module.CONF_PRODUCT_ID: "old-product",
-                },
-                options={
-                    module.CONF_TUYA_EMAIL: "old@example.com",
-                    module.CONF_TUYA_PASSWORD: "old-password",
-                    module.CONF_TUYA_COUNTRY: "1",
-                    module.CONF_TUYA_REGION: "us",
-                },
-            )
-            flow = module.TuyaBLELockConfigFlow()
-            flow.hass = FakeHass(entry)
-            flow.context = {"entry_id": entry.entry_id, "source": "reauth"}
+            flow, entry = self.make_flow(source="reauth")
+            self.install_successful_cloud_response()
 
-            async def fake_fetch_auth_key(*args, **kwargs):
-                return {
-                    "auth_key": "new-auth",
-                    "local_key": "abcdef1234567890",
-                    "device_id": "new-device-id",
-                    "product_id": "hc7n0urm",
-                    "uuid": "new-uuid",
-                }
-
-            module.async_fetch_auth_key = fake_fetch_auth_key
-
-            result = await flow.async_step_reauth(
-                {
-                    "email": "new@example.com",
-                    "password": "new-password",
-                    "country_code": "31",
-                    "region": "eu",
-                }
-            )
+            result = await flow.async_step_reauth(self.cloud_credentials_input())
 
             self.assertEqual(result, {"type": "abort", "reason": "reauth_successful"})
-            self.assertEqual(flow.hass.config_entries.reloads, [entry.entry_id])
-            self.assertEqual(entry.options[module.CONF_TUYA_EMAIL], "new@example.com")
-            self.assertEqual(entry.options[module.CONF_TUYA_PASSWORD], "new-password")
-            self.assertEqual(entry.options[module.CONF_TUYA_COUNTRY], "31")
-            self.assertEqual(entry.options[module.CONF_TUYA_REGION], "eu")
-            self.assertEqual(entry.data[module.CONF_AUTH_KEY], "new-auth")
-            self.assertEqual(entry.data[module.CONF_PRODUCT_ID], "hc7n0urm")
-            self.assertEqual(entry.data[module.CONF_DEVICE_UUID], "new-uuid")
-            self.assertEqual(entry.data[module.CONF_LOGIN_KEY], b"abcdef".hex())
-            self.assertEqual(entry.data[module.CONF_VIRTUAL_ID], (b"new-device-id" + b"\x00" * 22)[:22].hex())
+            self.assert_credentials_updated(flow, entry)
+
+        asyncio.run(scenario())
+
+    def test_reconfigure_shows_form_for_existing_entry(self):
+        async def scenario():
+            flow, _entry = self.make_flow(source="reconfigure")
+
+            result = await flow.async_step_reconfigure()
+
+            self.assertEqual(result["type"], "form")
+            self.assertEqual(result["step_id"], "reconfigure")
+            self.assertIn("data_schema", result)
+
+        asyncio.run(scenario())
+
+    def test_reconfigure_updates_existing_entry_options_and_reloads(self):
+        async def scenario():
+            flow, entry = self.make_flow(source="reconfigure")
+            self.install_successful_cloud_response()
+
+            result = await flow.async_step_reconfigure(self.cloud_credentials_input())
+
+            self.assertEqual(result, {"type": "abort", "reason": "reconfigure_successful"})
+            self.assert_credentials_updated(flow, entry)
 
         asyncio.run(scenario())
 
