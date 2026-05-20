@@ -66,6 +66,13 @@ STEP_EXISTING_CREDS_SCHEMA = vol.Schema({
 })
 
 
+def _normalize_mac(mac: str | None) -> str:
+    """Normalize a Bluetooth MAC address for duplicate checks."""
+    if not mac:
+        return ""
+    return "".join(ch for ch in mac.lower() if ch.isalnum())
+
+
 class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
@@ -86,9 +93,24 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._product_id = None
         self._setup_method = None
 
+    def _async_is_mac_configured(self, mac: str | None) -> bool:
+        """Return whether a lock with this Bluetooth address already exists."""
+        normalized_mac = _normalize_mac(mac)
+        if not normalized_mac:
+            return False
+
+        for entry in self._async_current_entries():
+            entry_mac = _normalize_mac(getattr(entry, "data", {}).get(CONF_DEVICE_MAC))
+            if entry_mac == normalized_mac:
+                return True
+        return False
+
     async def async_step_bluetooth(self, discovery_info):
         self._mac = discovery_info.address
         self._name = discovery_info.name or ""
+        if self._async_is_mac_configured(self._mac):
+            return self.async_abort(reason="already_configured")
+
         # Try to decrypt UUID from FD50 service data (standard Tuya BLE)
         svc_data = None
         for suuid, sd in (discovery_info.service_data or {}).items():
@@ -147,6 +169,9 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         if user_input:
             self._mac = user_input[CONF_DEVICE_MAC]
+            if self._async_is_mac_configured(self._mac):
+                return self.async_abort(reason="already_configured")
+
             dev = bluetooth.async_ble_device_from_address(self.hass, self._mac)
             if not dev:
                 return self.async_show_form(

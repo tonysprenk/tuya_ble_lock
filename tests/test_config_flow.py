@@ -16,6 +16,9 @@ class FakeConfigFlow:
     def __init_subclass__(cls, **kwargs):
         return super().__init_subclass__()
 
+    def _async_current_entries(self):
+        return getattr(self, "_current_entries", [])
+
     def async_show_form(self, **kwargs):
         return {"type": "form", **kwargs}
 
@@ -144,6 +147,7 @@ class TuyaBLELockConfigFlowTest(unittest.TestCase):
         flow = module.TuyaBLELockConfigFlow()
         flow.hass = FakeHass(entry)
         flow.context = {"entry_id": entry.entry_id, "source": source}
+        flow._current_entries = [entry]
         return flow, entry
 
     def install_successful_cloud_response(self):
@@ -178,6 +182,22 @@ class TuyaBLELockConfigFlowTest(unittest.TestCase):
             "country_code": "31",
             "region": "eu",
         }
+
+    def test_bluetooth_discovery_aborts_when_mac_already_configured(self):
+        async def scenario():
+            flow, _entry = self.make_flow(source="bluetooth")
+            discovery_info = SimpleNamespace(
+                address="dc:23:51:d9:8b:86",
+                name="TY",
+                service_data={},
+                manufacturer_data={},
+            )
+
+            result = await flow.async_step_bluetooth(discovery_info)
+
+            self.assertEqual(result, {"type": "abort", "reason": "already_configured"})
+
+        asyncio.run(scenario())
 
     def test_reauth_updates_existing_entry_options_and_reloads(self):
         async def scenario():
