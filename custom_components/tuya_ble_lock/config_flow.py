@@ -189,6 +189,9 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_choose_method(self, user_input=None):
         """Let user choose between cloud-assisted, standalone, or manual setup."""
+        if self._async_is_mac_configured(self._mac):
+            return self.async_abort(reason="already_configured")
+
         if user_input:
             method = user_input.get("setup_method", "cloud")
             self._setup_method = method
@@ -407,6 +410,9 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_confirm(self, user_input=None):
         if user_input is not None:
+            if self._async_is_mac_configured(self._mac):
+                return self.async_abort(reason="already_configured")
+
             data = {
                 CONF_DEVICE_MAC: self._mac,
                 CONF_DEVICE_UUID: self._uuid or "",

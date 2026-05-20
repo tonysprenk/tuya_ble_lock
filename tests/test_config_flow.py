@@ -199,6 +199,29 @@ class TuyaBLELockConfigFlowTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_stale_bluetooth_flow_aborts_when_mac_already_configured(self):
+        async def scenario():
+            flow, _entry = self.make_flow(source="bluetooth")
+            flow._mac = "DC:23:51:D9:8B:86"
+
+            result = await flow.async_step_choose_method()
+
+            self.assertEqual(result, {"type": "abort", "reason": "already_configured"})
+
+        asyncio.run(scenario())
+
+    def test_confirm_aborts_when_mac_already_configured(self):
+        async def scenario():
+            flow, _entry = self.make_flow(source="bluetooth")
+            flow._mac = "DC:23:51:D9:8B:86"
+            flow._name = "TY"
+
+            result = await flow.async_step_confirm({})
+
+            self.assertEqual(result, {"type": "abort", "reason": "already_configured"})
+
+        asyncio.run(scenario())
+
     def test_reauth_updates_existing_entry_options_and_reloads(self):
         async def scenario():
             flow, entry = self.make_flow(source="reauth")
