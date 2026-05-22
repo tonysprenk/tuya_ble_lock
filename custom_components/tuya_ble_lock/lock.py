@@ -148,4 +148,8 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
             elif auto_lock is True and not self._is_locked:
                 self._is_locked = True
 
+        lock_state = self.coordinator.state.get("lock_state")
+        if lock_state is not None:
+            self._is_locked = bool(lock_state)
+
         super()._handle_coordinator_update()

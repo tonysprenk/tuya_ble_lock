@@ -217,6 +217,18 @@ class TuyaBLELockEntityTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_cloud_lock_state_updates_locked_state(self):
+        entity, coordinator = self.make_entity()
+        entity._is_locked = False
+
+        coordinator.state["lock_state"] = True
+        entity._handle_coordinator_update()
+        self.assertTrue(entity.is_locked)
+
+        coordinator.state["lock_state"] = False
+        entity._handle_coordinator_update()
+        self.assertFalse(entity.is_locked)
+
 
 if __name__ == "__main__":
     unittest.main()

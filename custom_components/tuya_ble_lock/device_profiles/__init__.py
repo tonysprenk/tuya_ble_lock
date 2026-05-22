@@ -73,6 +73,15 @@ def parse_dp_value(raw: bytes, parse_type: str):
         return raw[0] if raw else None
     elif parse_type == "battery_state_enum":
         return BATTERY_STATE_MAP.get(raw[0], f"unknown_{raw[0]}") if raw else None
+    elif parse_type == "dp71_lock_state":
+        if len(raw) < 13:
+            return None
+        action = raw[12]
+        if action == 0x00:
+            return True
+        if action == 0x01:
+            return False
+        return None
     elif parse_type == "ignore":
         return None
     else:

@@ -4,7 +4,7 @@
   "model": "A1 Ultra-JM",
   "category": "jtmspro",
   "status_sync_seconds": 30,
-  "status_sync_dps": [47, 33],
+  "status_sync_dps": [47, 33, 71],
   "entities": {
     "lock": {
       "unlock_dp": 71,
@@ -51,7 +51,7 @@
     "47": { "key": "motor_state", "parse": "bool" },
     "61": { "key": "_ignore", "parse": "ignore" },
     "70": { "key": "_ignore", "parse": "ignore" },
-    "71": { "key": "_ignore", "parse": "ignore" },
+    "71": { "key": "lock_state", "parse": "dp71_lock_state" },
     "72": { "key": "_ignore", "parse": "ignore" },
     "73": { "key": "_ignore", "parse": "ignore" },
     "78": { "key": "_ignore", "parse": "ignore" }

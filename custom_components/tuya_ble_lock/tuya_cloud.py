@@ -112,11 +112,15 @@ class TuyaMobileAPIAsync:
 
         url = self.base_url + "/api.json"
         headers = {"User-Agent": "TuyaSmart/7.2.8 (Android)"}
-        _LOGGER.debug("Tuya API call: action=%s postData=%s", action, params.get("postData"))
+        _LOGGER.debug(
+            "Tuya API call: action=%s postData=%s",
+            action,
+            _redact_cloud_log_value(params.get("postData")),
+        )
         async with self._session.get(url, params=params, headers=headers) as resp:
             resp.raise_for_status()
             result = await resp.json()
-            _LOGGER.debug("Tuya API response: %s", result)
+            _LOGGER.debug("Tuya API response: %s", _redact_cloud_value(result))
             return result
 
     async def async_login(self, country_code: str, email: str, password: str) -> dict:
@@ -279,7 +283,21 @@ def _redact_cloud_value(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, inner in value.items():
             lowered = key.lower()
-            if lowered in {"localkey", "authkey", "token", "passwd", "password", "sid"}:
+            if lowered in {
+                "cuid",
+                "ecode",
+                "email",
+                "localkey",
+                "authkey",
+                "passwd",
+                "password",
+                "receiver",
+                "sid",
+                "token",
+                "uid",
+                "useralias",
+                "username",
+            }:
                 redacted[key] = "<redacted>"
             else:
                 redacted[key] = _redact_cloud_value(inner)
@@ -287,6 +305,16 @@ def _redact_cloud_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_cloud_value(item) for item in value]
     return value
+
+
+def _redact_cloud_log_value(value: Any) -> Any:
+    """Redact a cloud log value that may be a JSON-encoded string."""
+    if isinstance(value, str):
+        try:
+            return _redact_cloud_value(json.loads(value))
+        except Exception:
+            return "<redacted>" if value else value
+    return _redact_cloud_value(value)
 
 
 async def async_fetch_auth_key_only(
