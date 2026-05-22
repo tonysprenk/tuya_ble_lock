@@ -88,6 +88,18 @@ class TuyaGatewayTest(unittest.TestCase):
 
         self.assertEqual(dps, [{"id": 36, "raw": b"\x00\x00\x00\x1e"}])
 
+    def test_manual_lock_status_synthesizes_locked_dp71_payload(self):
+        dps = self.gateway.extract_dps_from_gateway_message(
+            {"data": {"devId": "device-1", "status": [{"code": "manual_lock", "value": True}]}},
+            "device-1",
+            {"manual_lock": 71},
+        )
+
+        self.assertEqual(len(dps), 1)
+        self.assertEqual(dps[0]["id"], 71)
+        self.assertGreaterEqual(len(dps[0]["raw"]), 13)
+        self.assertEqual(dps[0]["raw"][12], 0x00)
+
     def test_decodes_aes_encrypted_gateway_payload(self):
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 

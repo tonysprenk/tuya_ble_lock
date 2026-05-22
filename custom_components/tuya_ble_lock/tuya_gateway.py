@@ -6,12 +6,15 @@ import base64
 import binascii
 import json
 import logging
+import time
 import uuid
 from typing import Any
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 _LOGGER = logging.getLogger(__name__)
+
+_DP71_MANUAL_LOCK_CODES = {"manual_lock"}
 
 
 def extract_dps_from_gateway_message(
@@ -43,7 +46,7 @@ def extract_dps_from_gateway_message(
             dp_id = _dp_id_for_status_key(key, code_map)
             if dp_id is None or dp_id in seen:
                 continue
-            raw = _raw_bytes_from_status_value(value)
+            raw = _raw_bytes_from_status_value(value, dp_id=dp_id, status_code=key)
             if raw is None:
                 continue
             reports.append({"id": dp_id, "raw": raw})
@@ -51,9 +54,9 @@ def extract_dps_from_gateway_message(
 
         code = item.get("code")
         if isinstance(code, str) and code in code_map and code_map[code] not in seen:
-            raw = _raw_bytes_from_status_value(item.get("value"))
+            dp_id = code_map[code]
+            raw = _raw_bytes_from_status_value(item.get("value"), dp_id=dp_id, status_code=code)
             if raw is not None:
-                dp_id = code_map[code]
                 reports.append({"id": dp_id, "raw": raw})
                 seen.add(dp_id)
 
@@ -67,7 +70,16 @@ def _dp_id_for_status_key(key: str, status_code_map: dict[str, int]) -> int | No
     return int(mapped) if mapped is not None else None
 
 
-def _raw_bytes_from_status_value(value: Any) -> bytes | None:
+def _raw_bytes_from_status_value(
+    value: Any,
+    *,
+    dp_id: int | None = None,
+    status_code: str | None = None,
+) -> bytes | None:
+    if dp_id == 71 and status_code in _DP71_MANUAL_LOCK_CODES:
+        locked = _manual_lock_status_value(value)
+        if locked is not None:
+            return _synthetic_dp71_lock_state_payload(locked)
     if isinstance(value, bool):
         return b"\x01" if value else b"\x00"
     if isinstance(value, int):
@@ -80,6 +92,25 @@ def _raw_bytes_from_status_value(value: Any) -> bytes | None:
         except (binascii.Error, ValueError):
             return value.encode()
     return None
+
+
+def _manual_lock_status_value(value: Any) -> bool | None:
+    if value is True:
+        return True
+    if isinstance(value, int) and value == 1:
+        return True
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "lock", "locked", "manual_lock"}:
+            return True
+    return None
+
+
+def _synthetic_dp71_lock_state_payload(locked: bool) -> bytes:
+    # Keep the check-code bytes zeroed so a status-only event cannot replace the command check code.
+    action = b"\x00" if locked else b"\x01"
+    timestamp = int(time.time()).to_bytes(4, "big")
+    return b"\x00\x01\xff\xff" + bytes(8) + action + timestamp + b"\x00\x00"
 
 
 def decode_gateway_payload(payload: bytes | str, password: str) -> dict[str, Any] | None:
@@ -283,7 +314,17 @@ class TuyaGatewayStatusListener:
             self._gateway_status_code_map(),
         )
         if not dps:
+            _LOGGER.debug(
+                "Tuya gateway message for %s produced no mapped DPs; status=%s",
+                self.device_id,
+                _status_summary_for_log(message),
+            )
             return
+        _LOGGER.debug(
+            "Tuya gateway message for %s mapped DP ids=%s",
+            self.device_id,
+            [dp["id"] for dp in dps],
+        )
         self.hass.loop.call_soon_threadsafe(self._on_dps, dps)
 
     def _gateway_status_code_map(self) -> dict[str, int]:
@@ -302,6 +343,26 @@ class TuyaGatewayStatusListener:
 
 def _new_link_id() -> str:
     return uuid.uuid4().hex[:8]
+
+
+def _status_summary_for_log(message: dict[str, Any]) -> list[dict[str, Any]]:
+    data = message.get("data", {})
+    if not isinstance(data, dict):
+        return []
+    status_items = data.get("status", [])
+    if not isinstance(status_items, list):
+        return []
+    summary: list[dict[str, Any]] = []
+    for item in status_items:
+        if not isinstance(item, dict):
+            continue
+        summary.append(
+            {
+                "code": item.get("code"),
+                "keys": sorted(str(key) for key in item if key != "value"),
+            }
+        )
+    return summary
 
 
 def _parse_mqtt_url(url: str) -> tuple[str, int, bool]:

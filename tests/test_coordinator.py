@@ -162,6 +162,21 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_ignores_older_dp71_status_reports(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["state_map"] = {"71": {"key": "lock_state", "parse": "dp71_lock_state"}}
+            newer_locked = bytes.fromhex("0001ffff343939343536363300000000c80000")
+            older_unlocked = bytes.fromhex("0001ffff343939343536363301000000640000")
+
+            coordinator._process_dp_reports([{"id": 71, "raw": newer_locked}])
+            coordinator._process_dp_reports([{"id": 71, "raw": older_unlocked}])
+
+            self.assertTrue(coordinator.state["lock_state"])
+            self.assertEqual(coordinator.raw_dps[71], newer_locked)
+
+        asyncio.run(scenario())
+
     def test_background_poll_disconnects_when_it_opened_ble_connection(self):
         async def scenario():
             coordinator, session = self.make_coordinator()

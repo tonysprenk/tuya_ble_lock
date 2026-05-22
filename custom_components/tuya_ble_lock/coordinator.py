@@ -93,6 +93,9 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         state_map = self._profile.get("state_map", {})
         changed = False
         for dp in dps:
+            if dp.get("id") == 71 and self._is_older_dp71_report(bytes(dp["raw"])):
+                _LOGGER.debug("Ignoring older DP 71 status report for %s", self._entry.title)
+                continue
             self.raw_dps[dp["id"]] = bytes(dp["raw"])
             dp_id_str = str(dp["id"])
             mapping = state_map.get(dp_id_str)
@@ -108,6 +111,21 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 changed = True
         if changed:
             self.async_set_updated_data(self.state)
+
+    def _is_older_dp71_report(self, raw: bytes) -> bool:
+        current = self.raw_dps.get(71)
+        if not current:
+            return False
+        current_ts = self._dp71_timestamp(current)
+        incoming_ts = self._dp71_timestamp(raw)
+        return current_ts is not None and incoming_ts is not None and incoming_ts < current_ts
+
+    @staticmethod
+    def _dp71_timestamp(raw: bytes) -> int | None:
+        if len(raw) < 17:
+            return None
+        timestamp = int.from_bytes(raw[13:17], "big")
+        return timestamp or None
 
     def _reset_idle_timer(self) -> None:
         """Reset the idle disconnect timer. Call after every operation."""
