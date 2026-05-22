@@ -60,6 +60,44 @@ class TuyaCloudTest(unittest.TestCase):
         self.assertEqual(redacted["uid"], "<redacted>")
         self.assertEqual(redacted["domain"]["mobileApiUrl"], "https://a1.tuyaeu.com")
 
+    def test_call_accepts_json_returned_as_text_plain(self):
+        async def scenario():
+            class FakeResponse:
+                def __init__(self):
+                    self.json_content_type = "not-called"
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+                def raise_for_status(self):
+                    return None
+
+                async def json(self, *, content_type="application/json"):
+                    self.json_content_type = content_type
+                    return {"success": True}
+
+            class FakeSession:
+                def __init__(self):
+                    self.response = FakeResponse()
+
+                def get(self, *args, **kwargs):
+                    return self.response
+
+            session = FakeSession()
+            client = self.tuya_cloud.TuyaMobileAPIAsync(session=session, region="eu")
+
+            result = await client._call("device.openHubConfig", post_data={})
+
+            self.assertTrue(result["success"])
+            self.assertIsNone(session.response.json_content_type)
+
+        import asyncio
+
+        asyncio.run(scenario())
+
     def test_publish_device_dps_uses_mobile_dp_publish_action(self):
         async def scenario():
             client = self.tuya_cloud.TuyaMobileAPIAsync(session=None, region="eu")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import struct
 import time
 from datetime import timedelta
@@ -31,6 +32,14 @@ DEFAULT_CHECK_CODE_SOURCE_DPS = (73, 71)
 
 # Keep command BLE sessions short so the Tuya app/gateway can reconnect quickly.
 IDLE_DISCONNECT_SECONDS = 10
+
+
+def _safe_exception_message(exc: Exception) -> str:
+    """Return exception text without signed Tuya API query strings."""
+    message = str(exc)
+    if "api.json?" not in message:
+        return message
+    return re.sub(r"url='[^']+'", "url='<redacted>'", message)
 
 
 class TuyaBLELockCoordinator(DataUpdateCoordinator):
@@ -286,7 +295,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             _LOGGER.warning(
                 "Tuya gateway status listener failed to start for %s: %s",
                 self._entry.title,
-                exc,
+                _safe_exception_message(exc),
             )
             return False
         if not started:
@@ -437,10 +446,14 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning(
                     "Cloud check-code refresh failed for %s: %s",
                     self._entry.title,
-                    exc,
+                    _safe_exception_message(exc),
                 )
             else:
-                _LOGGER.debug("Cloud check-code refresh failed for %s: %s", self._entry.title, exc, exc_info=True)
+                _LOGGER.debug(
+                    "Cloud check-code refresh failed for %s: %s",
+                    self._entry.title,
+                    _safe_exception_message(exc),
+                )
             return
 
         cloud_dps = cloud_bundle["raw_dps"]
@@ -488,7 +501,11 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 source_dps=source_dps,
             )
         except Exception as exc:
-            _LOGGER.debug("Cloud status refresh failed for %s: %s", self._entry.title, exc, exc_info=True)
+            _LOGGER.debug(
+                "Cloud status refresh failed for %s: %s",
+                self._entry.title,
+                _safe_exception_message(exc),
+            )
             return False
 
         cloud_dps = cloud_bundle["raw_dps"]
@@ -622,7 +639,12 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 payload=payload,
             )
         except Exception as exc:
-            _LOGGER.warning("Tuya gateway %s command failed for %s: %s", action_name, self._entry.title, exc)
+            _LOGGER.warning(
+                "Tuya gateway %s command failed for %s: %s",
+                action_name,
+                self._entry.title,
+                _safe_exception_message(exc),
+            )
             return False
 
         if not result.get("success"):

@@ -394,6 +394,19 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_safe_exception_message_redacts_signed_tuya_urls(self):
+        message = self.coordinator_module._safe_exception_message(
+            RuntimeError(
+                "200, message='bad mime', url='https://a1.tuyaeu.com/api.json?"
+                "sid=session-secret&postData=%7B%22uid%22:%22user-id%22%7D&sign=abc123'"
+            )
+        )
+
+        self.assertNotIn("session-secret", message)
+        self.assertNotIn("user-id", message)
+        self.assertNotIn("abc123", message)
+        self.assertIn("<redacted>", message)
+
 
 if __name__ == "__main__":
     unittest.main()

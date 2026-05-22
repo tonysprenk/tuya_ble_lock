@@ -124,7 +124,7 @@ class TuyaMobileAPIAsync:
         )
         async with self._session.get(url, params=params, headers=headers) as resp:
             resp.raise_for_status()
-            result = await resp.json()
+            result = await resp.json(content_type=None)
             _LOGGER.debug("Tuya API response: %s", _redact_cloud_value(result))
             return result
 
