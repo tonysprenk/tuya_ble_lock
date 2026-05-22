@@ -4,7 +4,7 @@
   "model": "A1 Ultra-JM",
   "category": "jtmspro",
   "status_sync_seconds": 30,
-  "status_sync_dps": [47, 33, 71],
+  "status_sync_dps": [47, 33],
   "entities": {
     "lock": {
       "unlock_dp": 71,
@@ -12,8 +12,6 @@
       "gateway_status_listener": true,
       "openapi_status_sync": true,
       "gateway_status_code_map": {
-        "ble_unlock_check": 71,
-        "manual_lock": 71,
         "automatic_lock": 33,
         "lock_motor_state": 47,
         "auto_lock_time": 36
@@ -23,7 +21,6 @@
       "check_code": "49945663",
       "check_code_dp": [73, 71],
       "use_cloud_check_payload": true,
-      "motor_state_reflects_lock_state": false,
       "auto_lock_reflects_lock_state": false,
       "pair_central_dp70": false,
       "log_cloud_identity_debug": false
