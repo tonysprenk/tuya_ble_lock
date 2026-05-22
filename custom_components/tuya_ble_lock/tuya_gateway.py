@@ -255,8 +255,8 @@ class TuyaGatewayStatusListener:
         username = str(config.get("username") or "")
         password = str(config.get("password") or "")
         client_id = str(config.get("client_id") or "")
-        source_topic = _source_topic_from_config(config)
-        if not all((url, username, password, client_id, source_topic)):
+        source_topics = _source_topics_from_config(config)
+        if not all((url, username, password, client_id, source_topics)):
             _LOGGER.warning("Tuya gateway MQTT config missing required fields for %s", self.device_id)
             return False
 
@@ -268,7 +268,9 @@ class TuyaGatewayStatusListener:
         mqtt_client.on_connect = self._on_mqtt_connect
         mqtt_client.on_disconnect = self._on_mqtt_disconnect
         mqtt_client.on_message = self._on_mqtt_message
-        mqtt_client._tuya_source_topic = source_topic
+        mqtt_client.on_subscribe = self._on_mqtt_subscribe
+        mqtt_client._tuya_subscribe_topics = source_topics
+        mqtt_client._tuya_source_topic = source_topics[0]
 
         self._mqtt_password = password
         mqtt_client.connect(host, port, keepalive=60)
@@ -289,18 +291,55 @@ class TuyaGatewayStatusListener:
         if rc != 0:
             _LOGGER.warning("Tuya gateway MQTT connect failed for %s: rc=%s", self.device_id, rc)
             return
-        source_topic = getattr(client, "_tuya_source_topic", "")
-        if source_topic:
-            client.subscribe(source_topic)
-            _LOGGER.debug("Tuya gateway MQTT subscribed to %s for %s", source_topic, self.device_id)
+        source_topics = tuple(getattr(client, "_tuya_subscribe_topics", ()) or ())
+        if not source_topics:
+            source_topic = getattr(client, "_tuya_source_topic", "")
+            source_topics = (source_topic,) if source_topic else ()
+        _LOGGER.debug(
+            "Tuya gateway MQTT connected for %s; requesting %d subscriptions",
+            self.device_id,
+            len(source_topics),
+        )
+        for source_topic in source_topics:
+            result = client.subscribe(source_topic)
+            _LOGGER.debug(
+                "Tuya gateway MQTT subscribe requested for %s: topic=%s result=%s",
+                self.device_id,
+                _topic_for_log(source_topic),
+                result,
+            )
 
     def _on_mqtt_disconnect(self, _client, _userdata, rc, *_args) -> None:
         if rc and not self._closed:
             _LOGGER.warning("Tuya gateway MQTT disconnected for %s: rc=%s", self.device_id, rc)
 
+    def _on_mqtt_subscribe(self, _client, _userdata, mid, granted_qos, *_args) -> None:
+        qos_values = _mqtt_granted_qos_values(granted_qos)
+        if 128 in qos_values:
+            _LOGGER.warning(
+                "Tuya gateway MQTT subscription rejected for %s: mid=%s granted_qos=%s",
+                self.device_id,
+                mid,
+                qos_values,
+            )
+            return
+        _LOGGER.debug(
+            "Tuya gateway MQTT subscription acknowledged for %s: mid=%s granted_qos=%s",
+            self.device_id,
+            mid,
+            qos_values,
+        )
+
     def _on_mqtt_message(self, _client, _userdata, msg) -> None:
+        payload = msg.payload or b""
+        _LOGGER.debug(
+            "Tuya gateway MQTT message received for %s: topic=%s bytes=%d",
+            self.device_id,
+            _topic_for_log(str(getattr(msg, "topic", ""))),
+            len(payload),
+        )
         try:
-            decoded = decode_gateway_payload(msg.payload, self._mqtt_password)
+            decoded = decode_gateway_payload(payload, self._mqtt_password)
         except Exception:
             _LOGGER.debug("Failed to decode Tuya gateway MQTT payload for %s", self.device_id, exc_info=True)
             return
@@ -395,6 +434,58 @@ def _source_topic_from_config(config: dict[str, Any]) -> str:
                 return value
         return ""
     return str(source_topic or "")
+
+
+def _source_topics_from_config(config: dict[str, Any]) -> tuple[str, ...]:
+    topics: list[str] = []
+    source_topic = config.get("source_topic")
+    if isinstance(source_topic, dict):
+        device_topic = source_topic.get("device")
+        if isinstance(device_topic, str):
+            topics.append(device_topic)
+        topics.extend(
+            value
+            for value in source_topic.values()
+            if isinstance(value, str) and value != device_topic
+        )
+    elif source_topic:
+        topics.append(str(source_topic))
+
+    expanded: list[str] = []
+    for topic in topics:
+        expanded.append(topic)
+        if "#" not in topic and "+" not in topic:
+            expanded.append(f"{topic}/#")
+        if topic.startswith("cloud/token/in/"):
+            expanded.append("cloud/token/in/#")
+    return tuple(dict.fromkeys(expanded))
+
+
+def _topic_for_log(topic: str) -> str:
+    parts = topic.split("/")
+    if len(parts) >= 4 and parts[0] == "cloud" and parts[1] == "token":
+        parts[3] = _redact_topic_token(parts[3])
+    return "/".join(parts)
+
+
+def _redact_topic_token(value: str) -> str:
+    if len(value) <= 10:
+        return "<redacted>"
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def _mqtt_granted_qos_values(granted_qos) -> list[int]:
+    if granted_qos is None:
+        return []
+    if isinstance(granted_qos, int):
+        return [granted_qos]
+    result: list[int] = []
+    for value in granted_qos:
+        try:
+            result.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 def _create_mqtt_client(mqtt, client_id: str):

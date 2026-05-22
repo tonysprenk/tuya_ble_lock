@@ -164,6 +164,64 @@ class TuyaGatewayTest(unittest.TestCase):
 
         self.assertEqual(topic, "cloud/token/in/device")
 
+    def test_source_topics_include_exact_topic_and_wildcards(self):
+        topics = self.gateway._source_topics_from_config(
+            {"source_topic": "cloud/token/in/link-id"}
+        )
+
+        self.assertEqual(
+            topics,
+            (
+                "cloud/token/in/link-id",
+                "cloud/token/in/link-id/#",
+                "cloud/token/in/#",
+            ),
+        )
+
+    def test_source_topics_include_all_openapi_topic_object_values(self):
+        topics = self.gateway._source_topics_from_config(
+            {
+                "source_topic": {
+                    "device": "cloud/token/in/device-link",
+                    "other": "cloud/token/in/other-link",
+                }
+            }
+        )
+
+        self.assertEqual(
+            topics,
+            (
+                "cloud/token/in/device-link",
+                "cloud/token/in/device-link/#",
+                "cloud/token/in/#",
+                "cloud/token/in/other-link",
+                "cloud/token/in/other-link/#",
+            ),
+        )
+
+    def test_mqtt_connect_subscribes_to_all_configured_topics(self):
+        class FakeClient:
+            def __init__(self):
+                self._tuya_subscribe_topics = ("topic/a", "topic/b")
+                self.subscribed = []
+
+            def subscribe(self, topic):
+                self.subscribed.append(topic)
+                return (0, len(self.subscribed))
+
+        client = FakeClient()
+        listener = self.gateway.TuyaGatewayStatusListener(
+            hass=None,
+            entry=None,
+            profile={},
+            device_id="device-1",
+            on_dps=lambda _dps: None,
+        )
+
+        listener._on_mqtt_connect(client, None, None, 0)
+
+        self.assertEqual(client.subscribed, ["topic/a", "topic/b"])
+
 
 if __name__ == "__main__":
     unittest.main()
