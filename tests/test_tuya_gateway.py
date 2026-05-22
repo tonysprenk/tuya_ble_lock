@@ -164,7 +164,7 @@ class TuyaGatewayTest(unittest.TestCase):
 
         self.assertEqual(topic, "cloud/token/in/device")
 
-    def test_source_topics_include_exact_topic_and_wildcards(self):
+    def test_source_topics_include_exact_topic_only(self):
         topics = self.gateway._source_topics_from_config(
             {"source_topic": "cloud/token/in/link-id"}
         )
@@ -173,12 +173,10 @@ class TuyaGatewayTest(unittest.TestCase):
             topics,
             (
                 "cloud/token/in/link-id",
-                "cloud/token/in/link-id/#",
-                "cloud/token/in/#",
             ),
         )
 
-    def test_source_topics_include_all_openapi_topic_object_values(self):
+    def test_source_topics_include_all_openapi_topic_object_values_without_wildcards(self):
         topics = self.gateway._source_topics_from_config(
             {
                 "source_topic": {
@@ -192,10 +190,7 @@ class TuyaGatewayTest(unittest.TestCase):
             topics,
             (
                 "cloud/token/in/device-link",
-                "cloud/token/in/device-link/#",
-                "cloud/token/in/#",
                 "cloud/token/in/other-link",
-                "cloud/token/in/other-link/#",
             ),
         )
 

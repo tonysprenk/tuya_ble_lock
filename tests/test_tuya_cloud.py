@@ -233,6 +233,106 @@ class TuyaCloudTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_openapi_get_device_status_uses_status_endpoint(self):
+        async def scenario():
+            class FakeResponse:
+                def __init__(self, payload):
+                    self.payload = payload
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+                def raise_for_status(self):
+                    return None
+
+                async def json(self, *, content_type=None):
+                    return self.payload
+
+            class FakeSession:
+                def __init__(self):
+                    self.calls = []
+                    self.responses = [
+                        {"success": True, "result": {"access_token": "token", "uid": "uid-1"}},
+                        {"success": True, "result": [{"code": "manual_lock", "value": True}]},
+                    ]
+
+                def request(self, method, url, **kwargs):
+                    self.calls.append((method, url, kwargs))
+                    return FakeResponse(self.responses.pop(0))
+
+            session = FakeSession()
+            client = self.tuya_cloud.TuyaOpenAPIAsync(
+                session,
+                region="eu",
+                access_id="access-id",
+                access_secret="access-secret",
+            )
+
+            result = await client.async_get_device_status("device-1")
+
+            self.assertTrue(result["success"])
+            self.assertEqual(session.calls[1][0], "GET")
+            self.assertEqual(
+                session.calls[1][1],
+                "https://openapi.tuyaeu.com/v1.0/iot-03/devices/device-1/status",
+            )
+
+        import asyncio
+
+        asyncio.run(scenario())
+
+    def test_fetch_openapi_status_bundle_maps_status_codes_to_dps(self):
+        async def scenario():
+            module = self.tuya_cloud
+            events = []
+
+            class FakeOpenAPI:
+                def __init__(self, session, *, region, access_id, access_secret):
+                    events.append(("init", region, access_id, access_secret))
+
+                async def async_get_device_status(self, device_id):
+                    events.append(("status", device_id))
+                    return {
+                        "success": True,
+                        "result": [
+                            {"code": "manual_lock", "value": True},
+                            {"code": "automatic_lock", "value": False},
+                        ],
+                    }
+
+            old_client = module.TuyaOpenAPIAsync
+            module.TuyaOpenAPIAsync = FakeOpenAPI
+            try:
+                bundle = await module.async_fetch_openapi_status_bundle(
+                    hass=None,
+                    region="eu",
+                    access_id="access-id",
+                    access_secret="access-secret",
+                    device_id="device-1",
+                    status_code_map={"manual_lock": 71, "automatic_lock": 33},
+                    source_dps=(33, 71),
+                )
+            finally:
+                module.TuyaOpenAPIAsync = old_client
+
+            self.assertEqual(
+                events,
+                [
+                    ("init", "eu", "access-id", "access-secret"),
+                    ("status", "device-1"),
+                ],
+            )
+            self.assertEqual(bundle["raw_dps"][33], b"\x00")
+            self.assertEqual(bundle["raw_dps"][71][12], 0x00)
+            self.assertEqual(bundle["status_summary"], [("manual_lock", "bool"), ("automatic_lock", "bool")])
+
+        import asyncio
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

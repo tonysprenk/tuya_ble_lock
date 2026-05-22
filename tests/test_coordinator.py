@@ -82,7 +82,11 @@ def install_coordinator_stubs() -> None:
     async def async_fetch_cloud_lock_bundle(*args, **kwargs):
         raise AssertionError("test should not call the Tuya cloud")
 
+    async def async_fetch_openapi_status_bundle(*args, **kwargs):
+        raise AssertionError("test should not call the Tuya OpenAPI")
+
     tuya_cloud.async_fetch_cloud_lock_bundle = async_fetch_cloud_lock_bundle
+    tuya_cloud.async_fetch_openapi_status_bundle = async_fetch_openapi_status_bundle
 
     sys.modules.update(
         {
@@ -330,6 +334,83 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
             self.assertTrue(refreshed)
             self.assertEqual(coordinator.state["motor_state"], True)
+
+        asyncio.run(scenario())
+
+    def test_cloud_status_refresh_does_not_overwrite_newer_dp71(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            module = self.coordinator_module
+            coordinator._entry.data.update(
+                {
+                    module.CONF_TUYA_EMAIL: "user@example.com",
+                    module.CONF_TUYA_PASSWORD: "secret",
+                    module.CONF_TUYA_COUNTRY: "31",
+                    module.CONF_TUYA_REGION: "eu",
+                }
+            )
+            coordinator._profile["status_sync_dps"] = [71]
+            coordinator._profile["state_map"] = {"71": {"key": "lock_state", "parse": "dp71_lock_state"}}
+            newer_locked = bytes.fromhex("0001ffff343939343536363300000000c80000")
+            older_unlocked = bytes.fromhex("0001ffff343939343536363301000000640000")
+            coordinator._process_dp_reports([{"id": 71, "raw": newer_locked}])
+
+            async def fetch_cloud_lock_bundle(*args, **kwargs):
+                return {"raw_dps": {71: older_unlocked}}
+
+            old_fetch = module.async_fetch_cloud_lock_bundle
+            module.async_fetch_cloud_lock_bundle = fetch_cloud_lock_bundle
+            try:
+                refreshed = await coordinator._async_refresh_status_from_cloud()
+            finally:
+                module.async_fetch_cloud_lock_bundle = old_fetch
+
+            self.assertTrue(refreshed)
+            self.assertTrue(coordinator.state["lock_state"])
+            self.assertEqual(coordinator.raw_dps[71], newer_locked)
+
+        asyncio.run(scenario())
+
+    def test_openapi_status_refresh_uses_openapi_credentials_before_mobile_cloud(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            module = self.coordinator_module
+            coordinator._entry.data.update(
+                {
+                    module.CONF_TUYA_EMAIL: "user@example.com",
+                    module.CONF_TUYA_PASSWORD: "secret",
+                    module.CONF_TUYA_COUNTRY: "31",
+                    module.CONF_TUYA_REGION: "eu",
+                    module.CONF_TUYA_ACCESS_ID: "access-id",
+                    module.CONF_TUYA_ACCESS_SECRET: "access-secret",
+                }
+            )
+            coordinator._profile["status_sync_dps"] = [71]
+            coordinator._profile["entities"]["lock"]["openapi_status_sync"] = True
+            coordinator._profile["entities"]["lock"]["gateway_status_code_map"] = {"manual_lock": 71}
+            coordinator._profile["state_map"] = {"71": {"key": "lock_state", "parse": "dp71_lock_state"}}
+
+            async def fetch_openapi_status_bundle(*args, **kwargs):
+                self.assertEqual(kwargs["region"], "eu")
+                self.assertEqual(kwargs["access_id"], "access-id")
+                self.assertEqual(kwargs["access_secret"], "access-secret")
+                self.assertEqual(kwargs["device_id"], "ty-device")
+                self.assertEqual(kwargs["status_code_map"], {"manual_lock": 71})
+                self.assertEqual(kwargs["source_dps"], (71,))
+                return {
+                    "raw_dps": {71: bytes.fromhex("0001ffff343939343536363300000000c80000")},
+                    "status_summary": [("manual_lock", "bool")],
+                }
+
+            old_openapi = module.async_fetch_openapi_status_bundle
+            module.async_fetch_openapi_status_bundle = fetch_openapi_status_bundle
+            try:
+                refreshed = await coordinator._async_refresh_status_from_cloud()
+            finally:
+                module.async_fetch_openapi_status_bundle = old_openapi
+
+            self.assertTrue(refreshed)
+            self.assertTrue(coordinator.state["lock_state"])
 
         asyncio.run(scenario())
 

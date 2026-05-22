@@ -414,6 +414,10 @@ class TuyaOpenAPIAsync:
             },
         )
 
+    async def async_get_device_status(self, device_id: str) -> dict[str, Any]:
+        """Get the latest Tuya OpenAPI status list for one device."""
+        return await self._request("GET", f"/v1.0/iot-03/devices/{device_id}/status")
+
 
 def _openapi_sign_url(path: str, params: dict[str, str]) -> str:
     if not params:
@@ -459,6 +463,19 @@ def _redact_cloud_log_value(value: Any) -> Any:
         except Exception:
             return "<redacted>" if value else value
     return _redact_cloud_value(value)
+
+
+def _openapi_status_summary(status_items: Any) -> list[tuple[str, str]]:
+    if not isinstance(status_items, list):
+        return []
+    summary: list[tuple[str, str]] = []
+    for item in status_items:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code")
+        value = item.get("value")
+        summary.append((str(code), type(value).__name__))
+    return summary
 
 
 async def async_fetch_auth_key_only(
@@ -665,4 +682,49 @@ async def async_fetch_cloud_lock_bundle(
         "device_info_keys": sorted(device_info.get("raw", device_info).keys()),
         "dp_response": _redact_cloud_value(dp_resp),
         "decoded_dp_hex": decoded_dps,
+    }
+
+
+async def async_fetch_openapi_status_bundle(
+    hass: HomeAssistant,
+    *,
+    region: str,
+    access_id: str,
+    access_secret: str,
+    device_id: str,
+    status_code_map: dict[str, int],
+    source_dps: tuple[int, ...] = (),
+) -> dict[str, Any]:
+    """Fetch OpenAPI device status and convert mapped codes to DP reports."""
+    from .tuya_gateway import extract_dps_from_gateway_message
+
+    session = async_get_clientsession(hass)
+    client = TuyaOpenAPIAsync(
+        session,
+        region=region,
+        access_id=access_id,
+        access_secret=access_secret,
+    )
+    status_resp = await client.async_get_device_status(device_id)
+    status_items = status_resp.get("result", [])
+    if not isinstance(status_items, list):
+        raise Exception(f"Unexpected OpenAPI status response: {_redact_cloud_value(status_resp)}")
+
+    reports = extract_dps_from_gateway_message(
+        {"data": {"devId": device_id, "status": status_items}},
+        device_id,
+        status_code_map,
+    )
+    source_set = {int(dp_id) for dp_id in source_dps}
+    raw_dps: dict[int, bytes] = {}
+    for report in reports:
+        dp_id = int(report["id"])
+        if source_set and dp_id not in source_set:
+            continue
+        raw_dps[dp_id] = bytes(report["raw"])
+
+    return {
+        "raw_dps": raw_dps,
+        "status_summary": _openapi_status_summary(status_items),
+        "status_response": _redact_cloud_value(status_resp),
     }

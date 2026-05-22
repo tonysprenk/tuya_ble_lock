@@ -10,6 +10,7 @@
       "unlock_dp": 71,
       "preferred_control": "gateway",
       "gateway_status_listener": true,
+      "openapi_status_sync": true,
       "gateway_status_code_map": {
         "ble_unlock_check": 71,
         "manual_lock": 71,

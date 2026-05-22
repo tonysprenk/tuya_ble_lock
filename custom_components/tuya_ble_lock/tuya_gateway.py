@@ -454,10 +454,6 @@ def _source_topics_from_config(config: dict[str, Any]) -> tuple[str, ...]:
     expanded: list[str] = []
     for topic in topics:
         expanded.append(topic)
-        if "#" not in topic and "+" not in topic:
-            expanded.append(f"{topic}/#")
-        if topic.startswith("cloud/token/in/"):
-            expanded.append("cloud/token/in/#")
     return tuple(dict.fromkeys(expanded))
 
 

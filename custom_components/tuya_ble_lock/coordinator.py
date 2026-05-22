@@ -24,7 +24,7 @@ from .const import (
     CONF_TUYA_ACCESS_SECRET,
 )
 from .device_profiles import parse_dp_value
-from .tuya_cloud import async_fetch_cloud_lock_bundle
+from .tuya_cloud import async_fetch_cloud_lock_bundle, async_fetch_openapi_status_bundle
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -372,6 +372,18 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 continue
         return tuple(dict.fromkeys(result))
 
+    def _gateway_status_code_map(self) -> dict[str, int]:
+        code_map = self._lock_cfg().get("gateway_status_code_map", {})
+        if not isinstance(code_map, dict):
+            return {}
+        result: dict[str, int] = {}
+        for code, dp_id in code_map.items():
+            try:
+                result[str(code)] = int(dp_id)
+            except (TypeError, ValueError):
+                continue
+        return result
+
     @staticmethod
     def _normalize_check_code(value: bytes | str | None) -> bytes | None:
         if value is None:
@@ -545,6 +557,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         source_dps = self._status_sync_dps()
         if not source_dps:
             return False
+        if await self._async_refresh_status_from_openapi(source_dps):
+            return True
         credentials = self._cloud_credentials()
         if not credentials:
             return False
@@ -573,7 +587,6 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         if not cloud_dps:
             return False
 
-        self.raw_dps.update(cloud_dps)
         self._process_dp_reports(
             [{"id": dp_id, "raw": raw} for dp_id, raw in sorted(cloud_dps.items())]
         )
@@ -581,6 +594,53 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             "Refreshed cloud status DPs for %s: %s",
             self._entry.title,
             [(dp_id, raw.hex()) for dp_id, raw in cloud_dps.items()],
+        )
+        return True
+
+    async def _async_refresh_status_from_openapi(self, source_dps: tuple[int, ...]) -> bool:
+        if not self._lock_cfg().get("openapi_status_sync"):
+            return False
+        credentials = self._cloud_credentials()
+        if not credentials:
+            return False
+        access_id = credentials.get(CONF_TUYA_ACCESS_ID)
+        access_secret = credentials.get(CONF_TUYA_ACCESS_SECRET)
+        if not access_id or not access_secret:
+            return False
+        device_id = self._device_id_from_virtual_id()
+        if not device_id:
+            return False
+
+        try:
+            status_bundle = await async_fetch_openapi_status_bundle(
+                self.hass,
+                region=credentials[CONF_TUYA_REGION],
+                access_id=access_id,
+                access_secret=access_secret,
+                device_id=device_id,
+                status_code_map=self._gateway_status_code_map(),
+                source_dps=source_dps,
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "OpenAPI status refresh failed for %s: %s",
+                self._entry.title,
+                _safe_exception_message(exc),
+            )
+            return False
+
+        raw_dps = status_bundle["raw_dps"]
+        _LOGGER.debug(
+            "OpenAPI status for %s: codes=%s mapped=%s",
+            self._entry.title,
+            status_bundle.get("status_summary"),
+            [(dp_id, raw.hex()) for dp_id, raw in raw_dps.items()],
+        )
+        if not raw_dps:
+            return False
+
+        self._process_dp_reports(
+            [{"id": dp_id, "raw": raw} for dp_id, raw in sorted(raw_dps.items())]
         )
         return True
 
