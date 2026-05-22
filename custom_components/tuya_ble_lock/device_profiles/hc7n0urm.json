@@ -23,6 +23,8 @@
       "check_code": "49945663",
       "check_code_dp": [73, 71],
       "use_cloud_check_payload": true,
+      "motor_state_reflects_lock_state": false,
+      "auto_lock_reflects_lock_state": false,
       "pair_central_dp70": false,
       "log_cloud_identity_debug": false
     },

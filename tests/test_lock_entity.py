@@ -229,6 +229,16 @@ class TuyaBLELockEntityTest(unittest.TestCase):
         entity._handle_coordinator_update()
         self.assertFalse(entity.is_locked)
 
+    def test_auto_lock_setting_can_be_ignored_for_physical_lock_state(self):
+        entity, coordinator = self.make_entity()
+        entity._is_locked = True
+        entity._lock_cfg["auto_lock_reflects_lock_state"] = False
+
+        coordinator.state["auto_lock"] = False
+        entity._handle_coordinator_update()
+
+        self.assertTrue(entity.is_locked)
+
 
 if __name__ == "__main__":
     unittest.main()

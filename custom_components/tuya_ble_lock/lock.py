@@ -134,19 +134,21 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         - auto_lock=False (passage ON) = lock is unlocked
         - auto_lock=True (passage OFF) = lock is locked
         """
-        motor = self.coordinator.state.get("motor_state")
-        if self._lock_cfg.get("motor_state_true_is_unlocked"):
-            if motor is True and self._is_locked:
-                self._is_locked = False
-        if motor is False and not self._is_locked:
-            self._is_locked = True
-
-        auto_lock = self.coordinator.state.get("auto_lock")
-        if auto_lock is not None:
-            if auto_lock is False and self._is_locked:
-                self._is_locked = False
-            elif auto_lock is True and not self._is_locked:
+        if self._lock_cfg.get("motor_state_reflects_lock_state", True):
+            motor = self.coordinator.state.get("motor_state")
+            if self._lock_cfg.get("motor_state_true_is_unlocked"):
+                if motor is True and self._is_locked:
+                    self._is_locked = False
+            if motor is False and not self._is_locked:
                 self._is_locked = True
+
+        if self._lock_cfg.get("auto_lock_reflects_lock_state", True):
+            auto_lock = self.coordinator.state.get("auto_lock")
+            if auto_lock is not None:
+                if auto_lock is False and self._is_locked:
+                    self._is_locked = False
+                elif auto_lock is True and not self._is_locked:
+                    self._is_locked = True
 
         lock_state = self.coordinator.state.get("lock_state")
         if lock_state is not None:

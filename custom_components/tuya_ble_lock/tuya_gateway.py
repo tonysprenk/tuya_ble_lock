@@ -79,7 +79,7 @@ def _record_status_report(
 
 def _status_report_priority(dp_id: int, raw: bytes, status_code: str) -> int:
     if dp_id == 71 and status_code in _DP71_MANUAL_LOCK_CODES:
-        return 10
+        return 120
     if dp_id == 71 and len(raw) >= 13:
         return 100
     return 50
@@ -119,12 +119,18 @@ def _raw_bytes_from_status_value(
 def _manual_lock_status_value(value: Any) -> bool | None:
     if value is True:
         return True
+    if value is False:
+        return False
     if isinstance(value, int) and value == 1:
         return True
+    if isinstance(value, int) and value == 0:
+        return False
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"1", "true", "lock", "locked", "manual_lock"}:
             return True
+        if normalized in {"0", "false", "unlock", "unlocked", "manual_unlock"}:
+            return False
     return None
 
 
