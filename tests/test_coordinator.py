@@ -514,6 +514,40 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_ble_advertisement_listener_registers_for_device_address(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["entities"]["lock"]["ble_advertisement_listener"] = True
+            coordinator._ble_device = SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+            registrations = []
+
+            components = sys.modules.get("homeassistant.components") or types.ModuleType("homeassistant.components")
+            bluetooth = types.ModuleType("homeassistant.components.bluetooth")
+
+            class BluetoothScanningMode:
+                ACTIVE = "active"
+
+            def async_register_callback(hass, callback, matcher, mode):
+                registrations.append((hass, callback, matcher, mode))
+                return lambda: registrations.append(("unsubscribed",))
+
+            bluetooth.BluetoothScanningMode = BluetoothScanningMode
+            bluetooth.async_register_callback = async_register_callback
+            components.bluetooth = bluetooth
+            sys.modules["homeassistant.components"] = components
+            sys.modules["homeassistant.components.bluetooth"] = bluetooth
+
+            started = await coordinator.async_start_ble_advertisement_listener()
+
+            self.assertTrue(started)
+            self.assertEqual(registrations[0][2], {"address": "AA:BB:CC:DD:EE:FF"})
+            self.assertEqual(registrations[0][3], "active")
+
+            await coordinator.async_stop_ble_advertisement_listener()
+            self.assertEqual(registrations[-1], ("unsubscribed",))
+
+        asyncio.run(scenario())
+
     def test_gateway_status_listener_stop_is_idempotent(self):
         async def scenario():
             coordinator, _session = self.make_coordinator()

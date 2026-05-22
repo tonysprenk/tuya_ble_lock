@@ -71,6 +71,9 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self._listener_task: asyncio.Task | None = None
         self._gateway_status_listener = None
         self._gateway_status_retry_handle: asyncio.TimerHandle | None = None
+        self._ble_advertisement_unsub = None
+        self._last_ble_advertisement_signature: tuple | None = None
+        self._last_ble_advertisement_log_at = 0.0
         self._cloud_check_payloads: dict[int, bytes] = {}
         self._last_cloud_refresh_at = 0.0
 
@@ -277,6 +280,80 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     def _gateway_status_listener_enabled(self) -> bool:
         return bool(self._lock_cfg().get("gateway_status_listener"))
+
+    def _ble_advertisement_listener_enabled(self) -> bool:
+        return bool(self._lock_cfg().get("ble_advertisement_listener"))
+
+    async def async_start_ble_advertisement_listener(self) -> bool:
+        """Log matching BLE advertisements so we can learn if they carry status."""
+        if not self._ble_advertisement_listener_enabled():
+            return False
+        if self._ble_advertisement_unsub is not None:
+            return True
+        if not self._ble_device:
+            _LOGGER.debug("BLE advertisement listener not started for %s: missing BLE device", self._entry.title)
+            return False
+
+        from homeassistant.components import bluetooth
+
+        scanning_mode = getattr(bluetooth, "BluetoothScanningMode", None)
+        if scanning_mode is None:
+            _LOGGER.debug("BLE advertisement listener not started for %s: BluetoothScanningMode unavailable", self._entry.title)
+            return False
+
+        @callback
+        def _async_ble_advertisement(service_info, change) -> None:
+            self._handle_ble_advertisement(service_info, change)
+
+        self._ble_advertisement_unsub = bluetooth.async_register_callback(
+            self.hass,
+            _async_ble_advertisement,
+            {"address": self._ble_device.address},
+            scanning_mode.ACTIVE,
+        )
+        _LOGGER.info("BLE advertisement listener started for %s", self._entry.title)
+        return True
+
+    async def async_stop_ble_advertisement_listener(self) -> None:
+        """Stop the BLE advertisement listener if it is running."""
+        unsub = self._ble_advertisement_unsub
+        self._ble_advertisement_unsub = None
+        if unsub is not None:
+            unsub()
+
+    def _handle_ble_advertisement(self, service_info, change) -> None:
+        """Log changed BLE advertisements for later status decoding."""
+        service_data = {
+            str(key): bytes(value).hex()
+            for key, value in sorted((getattr(service_info, "service_data", {}) or {}).items())
+        }
+        manufacturer_data = {
+            int(key): bytes(value).hex()
+            for key, value in sorted((getattr(service_info, "manufacturer_data", {}) or {}).items())
+        }
+        service_uuids = tuple(sorted(getattr(service_info, "service_uuids", ()) or ()))
+        signature = (
+            tuple(service_data.items()),
+            tuple(manufacturer_data.items()),
+            service_uuids,
+        )
+        now = time.monotonic()
+        if signature == self._last_ble_advertisement_signature and now - self._last_ble_advertisement_log_at < 60:
+            return
+
+        self._last_ble_advertisement_signature = signature
+        self._last_ble_advertisement_log_at = now
+        _LOGGER.debug(
+            "BLE advertisement for %s: change=%s address=%s rssi=%s name=%s service_data=%s manufacturer_data=%s service_uuids=%s",
+            self._entry.title,
+            change,
+            getattr(service_info, "address", None),
+            getattr(service_info, "rssi", None),
+            getattr(service_info, "name", None),
+            service_data,
+            manufacturer_data,
+            list(service_uuids),
+        )
 
     async def async_start_gateway_status_listener(self) -> bool:
         """Start Tuya gateway/MQTT status sync when enabled by the profile."""
