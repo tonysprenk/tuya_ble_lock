@@ -84,6 +84,7 @@ class TuyaMobileAPIAsync:
     async def _call(
         self, action: str, version: str = "1.0",
         post_data: dict | None = None, country_code: str = "",
+        extra_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Make a signed API call to /api.json."""
         request_id = str(uuid_mod.uuid4())
@@ -106,6 +107,10 @@ class TuyaMobileAPIAsync:
             params["sid"] = self.sid
         if country_code:
             params["countryCode"] = country_code
+        if extra_params:
+            for key, value in extra_params.items():
+                if value is not None:
+                    params[key] = str(value)
         if post_data is not None:
             params["postData"] = json.dumps(post_data, separators=(",", ":"))
         params["sign"] = _sign(params, self._hmac_key)
@@ -216,6 +221,40 @@ class TuyaMobileAPIAsync:
         async with self._session.get(url, params=params, headers=headers) as resp:
             resp.raise_for_status()
             return await resp.json()
+
+    async def async_publish_device_dps(
+        self,
+        device_id: str,
+        dps: dict[str, Any],
+        *,
+        gid: int | str | None = None,
+    ) -> dict:
+        """Publish DP commands through Tuya's mobile/gateway path."""
+        payload: dict[str, Any] = {
+            "devId": device_id,
+            "gwId": device_id,
+            "dps": {str(key): value for key, value in dps.items()},
+        }
+        return await self._call(
+            "tuya.m.device.dp.publish",
+            version="1.0",
+            post_data=payload,
+            extra_params={"gid": gid} if gid is not None else None,
+        )
+
+    async def async_get_mqtt_config(self, link_id: str) -> dict:
+        """Get Tuya open-hub MQTT connection parameters for status sync."""
+        return await self._call(
+            "device.openHubConfig",
+            version="1.0",
+            post_data={
+                "uid": self.uid,
+                "link_id": link_id,
+                "link_type": "mqtt",
+                "topics": "device",
+                "msg_encrypted_version": "1.0",
+            },
+        )
 
     async def async_find_device_by_mac(self, device_mac: str) -> dict | None:
         """Look up device info by MAC address via cloud API.
@@ -425,6 +464,38 @@ async def async_fetch_check_code_dps(
         source_dps=source_dps,
     )
     return bundle["raw_dps"]
+
+
+async def async_publish_cloud_lock_dp(
+    hass: HomeAssistant,
+    email: str,
+    password: str,
+    country_code: str,
+    region: str,
+    device_id: str,
+    dp_id: int,
+    payload: bytes,
+) -> dict[str, Any]:
+    """Publish a RAW lock DP command through Tuya cloud/mobile gateway."""
+    stable_device_id = hashlib.sha256(
+        f"tuya_ble_lock|{email}|{device_id}|{region}".encode()
+    ).hexdigest()
+    session = async_get_clientsession(hass)
+    client = TuyaMobileAPIAsync(session, region=region, device_id=stable_device_id)
+    login_resp = await client.async_login(country_code, email, password)
+    if not login_resp.get("success"):
+        error = login_resp.get("errorMsg", login_resp.get("msg", "Login failed"))
+        raise Exception(f"Tuya login failed: {error}")
+
+    device_info = await client.async_find_device_by_dev_id(device_id)
+    if not device_info or not device_info.get("gid"):
+        raise Exception(f"Could not resolve gid for device {device_id}")
+
+    return await client.async_publish_device_dps(
+        device_id,
+        {str(dp_id): base64.b64encode(payload).decode()},
+        gid=device_info.get("gid"),
+    )
 
 
 async def async_fetch_cloud_lock_bundle(

@@ -76,6 +76,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_create_background_task(
         hass, coordinator.async_one_shot_status(), "tuya_ble_lock_status"
     )
+    entry.async_create_background_task(
+        hass,
+        coordinator.async_start_gateway_status_listener(),
+        "tuya_ble_lock_gateway_status",
+    )
 
     platforms = _platforms_for_profile(profile)
     entry.runtime_data = TuyaBLELockData(
@@ -91,5 +96,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data: TuyaBLELockData = entry.runtime_data
+    await data.coordinator.async_stop_gateway_status_listener()
     await data.coordinator._session.async_disconnect()
     return await hass.config_entries.async_unload_platforms(entry, data.platforms)

@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import base64
+import json
+import importlib
+import sys
+import types
+import unittest
+from pathlib import Path
+
+
+INTEGRATION_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "tuya_ble_lock"
+
+
+def install_gateway_stubs() -> None:
+    custom_components = sys.modules.get("custom_components") or types.ModuleType("custom_components")
+    tuya_ble_lock = sys.modules.get("custom_components.tuya_ble_lock") or types.ModuleType(
+        "custom_components.tuya_ble_lock"
+    )
+    tuya_ble_lock.__path__ = [str(INTEGRATION_DIR)]
+    sys.modules.update(
+        {
+            "custom_components": custom_components,
+            "custom_components.tuya_ble_lock": tuya_ble_lock,
+        }
+    )
+
+
+class TuyaGatewayTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        install_gateway_stubs()
+        sys.modules.pop("custom_components.tuya_ble_lock.tuya_gateway", None)
+        cls.gateway = importlib.import_module("custom_components.tuya_ble_lock.tuya_gateway")
+
+    def test_extracts_numeric_and_code_based_status_dps(self):
+        dp71 = bytes.fromhex("0001ffff3332373833333039016a088e3b0000")
+        message = {
+            "protocol": 4,
+            "data": {
+                "devId": "device-1",
+                "status": [
+                    {
+                        "code": "ble_unlock_check",
+                        "value": base64.b64encode(dp71).decode(),
+                        "71": base64.b64encode(dp71).decode(),
+                    },
+                    {"code": "automatic_lock", "value": True},
+                    {"code": "lock_motor_state", "value": False},
+                ],
+            },
+        }
+
+        dps = self.gateway.extract_dps_from_gateway_message(
+            message,
+            "device-1",
+            {
+                "ble_unlock_check": 71,
+                "automatic_lock": 33,
+                "lock_motor_state": 47,
+            },
+        )
+
+        self.assertEqual(
+            dps,
+            [
+                {"id": 71, "raw": dp71},
+                {"id": 33, "raw": b"\x01"},
+                {"id": 47, "raw": b"\x00"},
+            ],
+        )
+
+    def test_ignores_other_devices(self):
+        dps = self.gateway.extract_dps_from_gateway_message(
+            {"data": {"devId": "other", "status": [{"71": "AQI="}]}},
+            "device-1",
+            {"ble_unlock_check": 71},
+        )
+
+        self.assertEqual(dps, [])
+
+    def test_encodes_integer_status_values_as_big_endian(self):
+        dps = self.gateway.extract_dps_from_gateway_message(
+            {"data": {"devId": "device-1", "status": [{"code": "auto_lock_time", "value": 30}]}},
+            "device-1",
+            {"auto_lock_time": 36},
+        )
+
+        self.assertEqual(dps, [{"id": 36, "raw": b"\x00\x00\x00\x1e"}])
+
+    def test_decodes_aes_encrypted_gateway_payload(self):
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        password = "abcdefgh1234567890ijklmnop"
+        message = {"protocol": 4, "data": {"devId": "device-1", "status": [{"71": "AQI="}]}}
+        plaintext = json.dumps(message, separators=(",", ":")).encode()
+        pad_len = 16 - len(plaintext) % 16
+        padded = plaintext + bytes([pad_len]) * pad_len
+        encryptor = Cipher(
+            algorithms.AES(password[8:24].encode()),
+            modes.ECB(),
+        ).encryptor()
+        encrypted = encryptor.update(padded) + encryptor.finalize()
+        wrapper = {"data": base64.b64encode(encrypted).decode(), "protocol": 4}
+
+        decoded = self.gateway.decode_gateway_payload(json.dumps(wrapper).encode(), password)
+
+        self.assertEqual(decoded, message)
+
+    def test_listener_dispatches_matching_status_dps_on_ha_loop(self):
+        import asyncio
+
+        async def scenario():
+            received = []
+            event = asyncio.Event()
+
+            class FakeHass:
+                def __init__(self):
+                    self.loop = asyncio.get_running_loop()
+
+            def on_dps(dps):
+                received.append(dps)
+                event.set()
+
+            listener = self.gateway.TuyaGatewayStatusListener(
+                FakeHass(),
+                entry=None,
+                profile={
+                    "entities": {
+                        "lock": {
+                            "gateway_status_code_map": {"ble_unlock_check": 71},
+                        }
+                    }
+                },
+                device_id="device-1",
+                on_dps=on_dps,
+            )
+
+            listener._handle_decoded_message(
+                {"data": {"devId": "device-1", "status": [{"code": "ble_unlock_check", "value": "AQI="}]}}
+            )
+
+            await asyncio.wait_for(event.wait(), timeout=0.2)
+            self.assertEqual(received, [[{"id": 71, "raw": b"\x01\x02"}]])
+
+        asyncio.run(scenario())
+
+
+if __name__ == "__main__":
+    unittest.main()

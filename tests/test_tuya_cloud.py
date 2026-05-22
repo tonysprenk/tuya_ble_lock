@@ -60,6 +60,83 @@ class TuyaCloudTest(unittest.TestCase):
         self.assertEqual(redacted["uid"], "<redacted>")
         self.assertEqual(redacted["domain"]["mobileApiUrl"], "https://a1.tuyaeu.com")
 
+    def test_publish_device_dps_uses_mobile_dp_publish_action(self):
+        async def scenario():
+            client = self.tuya_cloud.TuyaMobileAPIAsync(session=None, region="eu")
+            calls = []
+
+            async def fake_call(action, version="1.0", post_data=None, country_code="", extra_params=None):
+                calls.append((action, version, post_data, country_code, extra_params))
+                return {"success": True, "result": True}
+
+            client._call = fake_call
+
+            result = await client.async_publish_device_dps(
+                "device-1",
+                {"71": "AAH/"},
+                gid="home-1",
+            )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(
+                calls,
+                [
+                    (
+                        "tuya.m.device.dp.publish",
+                        "1.0",
+                        {
+                            "devId": "device-1",
+                            "gwId": "device-1",
+                            "dps": {"71": "AAH/"},
+                        },
+                        "",
+                        {"gid": "home-1"},
+                    )
+                ],
+            )
+
+        import asyncio
+
+        asyncio.run(scenario())
+
+    def test_get_mqtt_config_uses_open_hub_config_action(self):
+        async def scenario():
+            client = self.tuya_cloud.TuyaMobileAPIAsync(session=None, region="eu")
+            client.uid = "user-1"
+            calls = []
+
+            async def fake_call(action, version="1.0", post_data=None, country_code="", extra_params=None):
+                calls.append((action, version, post_data, country_code, extra_params))
+                return {"success": True, "result": {"source_topic": "topic"}}
+
+            client._call = fake_call
+
+            result = await client.async_get_mqtt_config("abc12345")
+
+            self.assertTrue(result["success"])
+            self.assertEqual(
+                calls,
+                [
+                    (
+                        "device.openHubConfig",
+                        "1.0",
+                        {
+                            "uid": "user-1",
+                            "link_id": "abc12345",
+                            "link_type": "mqtt",
+                            "topics": "device",
+                            "msg_encrypted_version": "1.0",
+                        },
+                        "",
+                        None,
+                    )
+                ],
+            )
+
+        import asyncio
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -212,6 +212,75 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_gateway_preferred_unlock_tries_gateway_before_ble(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["entities"]["lock"]["preferred_control"] = "gateway"
+            events = []
+
+            async def gateway_lock_action(*, action_unlock):
+                events.append(("gateway", action_unlock))
+                return True
+
+            async def refresh_check_code_from_cloud(*, force=False):
+                events.append(("refresh", force))
+
+            async def pair_central_from_cloud():
+                events.append(("pair", None))
+
+            async def send_lock_action(*, action_unlock, allow_retry):
+                events.append(("ble", action_unlock, allow_retry))
+
+            coordinator._async_send_gateway_lock_action = gateway_lock_action
+            coordinator._async_refresh_check_code_from_cloud = refresh_check_code_from_cloud
+            coordinator._async_pair_central_from_cloud = pair_central_from_cloud
+            coordinator._async_send_lock_action = send_lock_action
+
+            await coordinator.async_unlock()
+
+            self.assertEqual(events, [("gateway", True)])
+
+        asyncio.run(scenario())
+
+    def test_gateway_preferred_unlock_falls_back_to_ble_when_gateway_fails(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["entities"]["lock"]["preferred_control"] = "gateway"
+            coordinator._profile["entities"]["lock"]["use_cloud_check_payload"] = True
+            events = []
+
+            async def gateway_lock_action(*, action_unlock):
+                events.append(("gateway", action_unlock))
+                return False
+
+            async def refresh_check_code_from_cloud(*, force=False):
+                events.append(("refresh", force))
+
+            async def pair_central_from_cloud():
+                events.append(("pair", None))
+
+            async def send_lock_action(*, action_unlock, allow_retry):
+                events.append(("ble", action_unlock, allow_retry))
+
+            coordinator._async_send_gateway_lock_action = gateway_lock_action
+            coordinator._async_refresh_check_code_from_cloud = refresh_check_code_from_cloud
+            coordinator._async_pair_central_from_cloud = pair_central_from_cloud
+            coordinator._async_send_lock_action = send_lock_action
+
+            await coordinator.async_unlock()
+
+            self.assertEqual(
+                events,
+                [
+                    ("gateway", True),
+                    ("refresh", True),
+                    ("pair", None),
+                    ("ble", True, True),
+                ],
+            )
+
+        asyncio.run(scenario())
+
     def test_cloud_status_refresh_uses_credentials_from_entry_data(self):
         async def scenario():
             coordinator, _session = self.make_coordinator()
@@ -246,6 +315,82 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
             self.assertTrue(refreshed)
             self.assertEqual(coordinator.state["motor_state"], True)
+
+        asyncio.run(scenario())
+
+    def test_gateway_status_listener_starts_with_credentials_from_entry_data(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            module = self.coordinator_module
+            coordinator._entry.data.update(
+                {
+                    module.CONF_TUYA_EMAIL: "user@example.com",
+                    module.CONF_TUYA_PASSWORD: "secret",
+                    module.CONF_TUYA_COUNTRY: "31",
+                    module.CONF_TUYA_REGION: "eu",
+                }
+            )
+            coordinator._profile["entities"]["lock"]["gateway_status_listener"] = True
+            events = []
+
+            gateway_module = types.ModuleType("custom_components.tuya_ble_lock.tuya_gateway")
+
+            class FakeListener:
+                def __init__(self, hass, entry, profile, device_id, on_dps, *, credentials=None):
+                    events.append(("init", device_id, credentials))
+                    self.on_dps = on_dps
+
+                async def async_start(self):
+                    events.append(("start",))
+                    return True
+
+            gateway_module.TuyaGatewayStatusListener = FakeListener
+            old_gateway = sys.modules.get("custom_components.tuya_ble_lock.tuya_gateway")
+            sys.modules["custom_components.tuya_ble_lock.tuya_gateway"] = gateway_module
+            try:
+                started = await coordinator.async_start_gateway_status_listener()
+            finally:
+                if old_gateway is not None:
+                    sys.modules["custom_components.tuya_ble_lock.tuya_gateway"] = old_gateway
+                else:
+                    sys.modules.pop("custom_components.tuya_ble_lock.tuya_gateway", None)
+
+            self.assertTrue(started)
+            self.assertEqual(
+                events,
+                [
+                    (
+                        "init",
+                        "ty-device",
+                        {
+                            module.CONF_TUYA_EMAIL: "user@example.com",
+                            module.CONF_TUYA_PASSWORD: "secret",
+                            module.CONF_TUYA_COUNTRY: "31",
+                            module.CONF_TUYA_REGION: "eu",
+                        },
+                    ),
+                    ("start",),
+                ],
+            )
+
+        asyncio.run(scenario())
+
+    def test_gateway_status_listener_stop_is_idempotent(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            events = []
+
+            class FakeListener:
+                async def async_stop(self):
+                    events.append("stop")
+
+            coordinator._gateway_status_listener = FakeListener()
+
+            await coordinator.async_stop_gateway_status_listener()
+            await coordinator.async_stop_gateway_status_listener()
+
+            self.assertEqual(events, ["stop"])
+            self.assertIsNone(coordinator._gateway_status_listener)
 
         asyncio.run(scenario())
 

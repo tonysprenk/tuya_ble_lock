@@ -57,6 +57,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self._profile = profile
         self._idle_timer: asyncio.TimerHandle | None = None
         self._listener_task: asyncio.Task | None = None
+        self._gateway_status_listener = None
         self._cloud_check_payloads: dict[int, bytes] = {}
         self._last_cloud_refresh_at = 0.0
 
@@ -239,6 +240,66 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     def _lock_cfg(self) -> dict:
         return self._profile.get("entities", {}).get("lock", {})
+
+    def _gateway_control_preferred(self) -> bool:
+        return self._lock_cfg().get("preferred_control") == "gateway"
+
+    def _gateway_status_listener_enabled(self) -> bool:
+        return bool(self._lock_cfg().get("gateway_status_listener"))
+
+    async def async_start_gateway_status_listener(self) -> bool:
+        """Start Tuya gateway/MQTT status sync when enabled by the profile."""
+        if not self._gateway_status_listener_enabled():
+            return False
+        if self._gateway_status_listener is not None:
+            return True
+
+        credentials = self._cloud_credentials()
+        if not credentials:
+            _LOGGER.warning(
+                "Cannot start Tuya gateway status listener for %s: cloud credentials are missing",
+                self._entry.title,
+            )
+            return False
+
+        device_id = self._device_id_from_virtual_id()
+        if not device_id:
+            _LOGGER.warning(
+                "Cannot start Tuya gateway status listener for %s: device id is missing",
+                self._entry.title,
+            )
+            return False
+
+        from .tuya_gateway import TuyaGatewayStatusListener
+
+        listener = TuyaGatewayStatusListener(
+            self.hass,
+            self._entry,
+            self._profile,
+            device_id,
+            self._process_dp_reports,
+            credentials=credentials,
+        )
+        try:
+            started = await listener.async_start()
+        except Exception as exc:
+            _LOGGER.warning(
+                "Tuya gateway status listener failed to start for %s: %s",
+                self._entry.title,
+                exc,
+            )
+            return False
+        if not started:
+            return False
+        self._gateway_status_listener = listener
+        return True
+
+    async def async_stop_gateway_status_listener(self) -> None:
+        """Stop the Tuya gateway/MQTT status listener if it is running."""
+        listener = self._gateway_status_listener
+        self._gateway_status_listener = None
+        if listener is not None:
+            await listener.async_stop()
 
     def _status_sync_dps(self) -> tuple[int, ...]:
         value = self._profile.get("status_sync_dps", ())
@@ -532,6 +593,46 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         return_code = raw[-1] if raw else None
         _LOGGER.warning("DP70 pair/add response: %s (return=%s)", raw.hex(), return_code)
 
+    async def _async_send_gateway_lock_action(self, *, action_unlock: bool) -> bool:
+        """Send a lock action through the Tuya gateway/mobile cloud path."""
+        credentials = self._cloud_credentials()
+        if not credentials:
+            _LOGGER.warning("Cannot send Tuya gateway lock command for %s: cloud credentials are missing", self._entry.title)
+            return False
+
+        device_id = self._device_id_from_virtual_id()
+        if not device_id:
+            _LOGGER.warning("Cannot send Tuya gateway lock command for %s: device id is missing", self._entry.title)
+            return False
+
+        unlock_dp = self._get_unlock_dp()
+        payload = self._build_unlock_payload(action_unlock=action_unlock)
+        action_name = "unlock" if action_unlock else "lock"
+        try:
+            from .tuya_cloud import async_publish_cloud_lock_dp
+
+            result = await async_publish_cloud_lock_dp(
+                self.hass,
+                email=credentials[CONF_TUYA_EMAIL],
+                password=credentials[CONF_TUYA_PASSWORD],
+                country_code=credentials[CONF_TUYA_COUNTRY],
+                region=credentials[CONF_TUYA_REGION],
+                device_id=device_id,
+                dp_id=unlock_dp,
+                payload=payload,
+            )
+        except Exception as exc:
+            _LOGGER.warning("Tuya gateway %s command failed for %s: %s", action_name, self._entry.title, exc)
+            return False
+
+        if not result.get("success"):
+            _LOGGER.warning("Tuya gateway %s command rejected for %s: %s", action_name, self._entry.title, result)
+            return False
+
+        self.state["lock_state"] = not action_unlock
+        self.async_set_updated_data(self.state)
+        return True
+
     def _get_payload_version(self) -> int:
         value = self._lock_cfg().get("payload_version", 1)
         try:
@@ -638,6 +739,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     async def async_lock(self) -> None:
         async with self._op_lock:
+            if self._gateway_control_preferred() and await self._async_send_gateway_lock_action(action_unlock=False):
+                return
             await self._async_refresh_check_code_from_cloud(
                 force=bool(self._lock_cfg().get("use_cloud_check_payload"))
             )
@@ -647,6 +750,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     async def async_unlock(self) -> None:
         async with self._op_lock:
+            if self._gateway_control_preferred() and await self._async_send_gateway_lock_action(action_unlock=True):
+                return
             await self._async_refresh_check_code_from_cloud(
                 force=bool(self._lock_cfg().get("use_cloud_check_payload"))
             )

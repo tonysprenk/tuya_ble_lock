@@ -2,7 +2,7 @@
 
 ## Overview
 
-Tuya BLE Lock is a Home Assistant custom integration for **local Bluetooth control** of Tuya-based smart door locks. After a one-time cloud-assisted setup, all daily operations (lock, unlock, credential management) happen entirely over BLE with **zero cloud dependency**.
+Tuya BLE Lock is a Home Assistant custom integration for Tuya-based smart door locks. Most profiles use **local Bluetooth control** after a one-time cloud-assisted setup. Profiles that need Tuya app/gateway coexistence can optionally use Tuya gateway cloud sync for lock state and lock/unlock commands, with BLE kept as a fallback.
 
 Key features:
 - Lock/unlock via Home Assistant UI or automations
@@ -85,11 +85,13 @@ The **Cloud-Assisted** and **Standalone** setup methods require your Tuya Smart 
 
 Tuya BLE locks use a unique encryption key (called an "auth key") that is assigned to each device during manufacturing. This key is stored on Tuya's cloud servers and is required to establish a secure BLE session with the lock. There is no way to extract it from the lock itself.
 
-During setup, the integration logs into the Tuya cloud API on your behalf to retrieve this key. After this one-time step:
+During setup, the integration logs into the Tuya cloud API on your behalf to retrieve this key. After this one-time step, local-only profiles work as follows:
 
 - **Your email and password are not stored** — they are used only during the setup flow and discarded immediately
 - **The lock is not associated or re-associated** with the account — the integration simply reads the device's auth key
 - **No cloud connection is ever made again** — all subsequent operations happen entirely over local Bluetooth
+
+Some gateway-sync profiles intentionally keep the Tuya app credentials in the config entry so Home Assistant can receive Tuya gateway status events and send commands through the same path as the app. Use those profiles when you need Home Assistant, HomeKit, and the Tuya app to stay synchronized.
 
 If you prefer to avoid cloud credentials entirely, use the **Manual Auth Key** method and provide the auth key directly.
 
@@ -103,6 +105,8 @@ However, BLE locks only support **one active connection at a time**. This means:
 - If **Home Assistant** is holding a BLE connection (within 60 seconds of the last operation), the Tuya app will not be able to connect until HA's idle timeout expires
 
 In practice this is rarely an issue — the integration automatically disconnects after 60 seconds of inactivity, and the app only connects briefly when you interact with it. PINs, fingerprints, and cards always work regardless of which controller is connected, since they are processed locally by the lock.
+
+For profiles with gateway sync enabled, Home Assistant prefers the Tuya gateway/cloud command path and listens to Tuya gateway status events. This avoids keeping a BLE session open for normal lock/unlock control and lets the Tuya app remain the other supported control surface.
 
 ## Entities
 
