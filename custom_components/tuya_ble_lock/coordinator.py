@@ -34,6 +34,7 @@ DEFAULT_CHECK_CODE_SOURCE_DPS = (73, 71)
 
 # Keep command BLE sessions short so the Tuya app/gateway can reconnect quickly.
 IDLE_DISCONNECT_SECONDS = 10
+GATEWAY_STATUS_RETRY_SECONDS = 60
 
 
 def _safe_exception_message(exc: Exception) -> str:
@@ -69,6 +70,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self._idle_timer: asyncio.TimerHandle | None = None
         self._listener_task: asyncio.Task | None = None
         self._gateway_status_listener = None
+        self._gateway_status_retry_handle: asyncio.TimerHandle | None = None
         self._cloud_check_payloads: dict[int, bytes] = {}
         self._last_cloud_refresh_at = 0.0
 
@@ -317,18 +319,46 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 self._entry.title,
                 _safe_exception_message(exc),
             )
+            self._schedule_gateway_status_listener_retry()
             return False
         if not started:
+            self._schedule_gateway_status_listener_retry()
             return False
+        self._cancel_gateway_status_listener_retry()
         self._gateway_status_listener = listener
         return True
 
     async def async_stop_gateway_status_listener(self) -> None:
         """Stop the Tuya gateway/MQTT status listener if it is running."""
+        self._cancel_gateway_status_listener_retry()
         listener = self._gateway_status_listener
         self._gateway_status_listener = None
         if listener is not None:
             await listener.async_stop()
+
+    def _schedule_gateway_status_listener_retry(self) -> None:
+        handle = self._gateway_status_retry_handle
+        if handle is not None and not handle.cancelled():
+            return
+        _LOGGER.debug(
+            "Retrying Tuya gateway status listener for %s in %s seconds",
+            self._entry.title,
+            GATEWAY_STATUS_RETRY_SECONDS,
+        )
+        self._gateway_status_retry_handle = self.hass.loop.call_later(
+            GATEWAY_STATUS_RETRY_SECONDS,
+            self._run_gateway_status_listener_retry,
+        )
+
+    def _run_gateway_status_listener_retry(self) -> None:
+        self._gateway_status_retry_handle = None
+        self.hass.async_create_task(self.async_start_gateway_status_listener())
+
+    def _cancel_gateway_status_listener_retry(self) -> None:
+        handle = self._gateway_status_retry_handle
+        self._gateway_status_retry_handle = None
+        if handle is not None:
+            handle.cancel()
 
     def _status_sync_dps(self) -> tuple[int, ...]:
         value = self._profile.get("status_sync_dps", ())

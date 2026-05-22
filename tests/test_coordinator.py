@@ -390,6 +390,49 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_gateway_status_listener_start_failure_schedules_retry(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            module = self.coordinator_module
+            coordinator._entry.data.update(
+                {
+                    module.CONF_TUYA_EMAIL: "user@example.com",
+                    module.CONF_TUYA_PASSWORD: "secret",
+                    module.CONF_TUYA_COUNTRY: "31",
+                    module.CONF_TUYA_REGION: "eu",
+                }
+            )
+            coordinator._profile["entities"]["lock"]["gateway_status_listener"] = True
+
+            gateway_module = types.ModuleType("custom_components.tuya_ble_lock.tuya_gateway")
+
+            class FakeListener:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def async_start(self):
+                    raise RuntimeError("temporary DNS failure")
+
+            gateway_module.TuyaGatewayStatusListener = FakeListener
+            old_gateway = sys.modules.get("custom_components.tuya_ble_lock.tuya_gateway")
+            sys.modules["custom_components.tuya_ble_lock.tuya_gateway"] = gateway_module
+            try:
+                started = await coordinator.async_start_gateway_status_listener()
+            finally:
+                if old_gateway is not None:
+                    sys.modules["custom_components.tuya_ble_lock.tuya_gateway"] = old_gateway
+                else:
+                    sys.modules.pop("custom_components.tuya_ble_lock.tuya_gateway", None)
+
+            self.assertFalse(started)
+            handle = coordinator._gateway_status_retry_handle
+            self.assertIsNotNone(handle)
+
+            await coordinator.async_stop_gateway_status_listener()
+            self.assertTrue(handle.cancelled())
+
+        asyncio.run(scenario())
+
     def test_gateway_status_listener_stop_is_idempotent(self):
         async def scenario():
             coordinator, _session = self.make_coordinator()
