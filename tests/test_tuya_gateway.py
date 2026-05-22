@@ -100,6 +100,24 @@ class TuyaGatewayTest(unittest.TestCase):
         self.assertGreaterEqual(len(dps[0]["raw"]), 13)
         self.assertEqual(dps[0]["raw"][12], 0x00)
 
+    def test_ble_unlock_check_payload_takes_priority_over_manual_lock(self):
+        unlocked_dp71 = bytes.fromhex("0001ffff343939343536363301000000c80000")
+        dps = self.gateway.extract_dps_from_gateway_message(
+            {
+                "data": {
+                    "devId": "device-1",
+                    "status": [
+                        {"code": "manual_lock", "value": True},
+                        {"code": "ble_unlock_check", "value": base64.b64encode(unlocked_dp71).decode()},
+                    ],
+                }
+            },
+            "device-1",
+            {"manual_lock": 71, "ble_unlock_check": 71},
+        )
+
+        self.assertEqual(dps, [{"id": 71, "raw": unlocked_dp71}])
+
     def test_decodes_aes_encrypted_gateway_payload(self):
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 

@@ -37,30 +37,52 @@ def extract_dps_from_gateway_message(
         return []
 
     code_map = status_code_map or {}
-    reports: list[dict[str, Any]] = []
-    seen: set[int] = set()
+    reports_by_id: dict[int, tuple[int, bytes]] = {}
+    report_order: list[int] = []
     for item in status_items:
         if not isinstance(item, dict):
             continue
         for key, value in item.items():
             dp_id = _dp_id_for_status_key(key, code_map)
-            if dp_id is None or dp_id in seen:
+            if dp_id is None:
                 continue
             raw = _raw_bytes_from_status_value(value, dp_id=dp_id, status_code=key)
             if raw is None:
                 continue
-            reports.append({"id": dp_id, "raw": raw})
-            seen.add(dp_id)
+            _record_status_report(reports_by_id, report_order, dp_id, raw, key)
 
         code = item.get("code")
-        if isinstance(code, str) and code in code_map and code_map[code] not in seen:
+        if isinstance(code, str) and code in code_map:
             dp_id = code_map[code]
             raw = _raw_bytes_from_status_value(item.get("value"), dp_id=dp_id, status_code=code)
             if raw is not None:
-                reports.append({"id": dp_id, "raw": raw})
-                seen.add(dp_id)
+                _record_status_report(reports_by_id, report_order, dp_id, raw, code)
 
-    return reports
+    return [{"id": dp_id, "raw": reports_by_id[dp_id][1]} for dp_id in report_order]
+
+
+def _record_status_report(
+    reports_by_id: dict[int, tuple[int, bytes]],
+    report_order: list[int],
+    dp_id: int,
+    raw: bytes,
+    status_code: str,
+) -> None:
+    priority = _status_report_priority(dp_id, raw, status_code)
+    existing = reports_by_id.get(dp_id)
+    if existing is not None and existing[0] >= priority:
+        return
+    if existing is None:
+        report_order.append(dp_id)
+    reports_by_id[dp_id] = (priority, raw)
+
+
+def _status_report_priority(dp_id: int, raw: bytes, status_code: str) -> int:
+    if dp_id == 71 and status_code in _DP71_MANUAL_LOCK_CODES:
+        return 10
+    if dp_id == 71 and len(raw) >= 13:
+        return 100
+    return 50
 
 
 def _dp_id_for_status_key(key: str, status_code_map: dict[str, int]) -> int | None:
