@@ -1,0 +1,319 @@
+"""Read-only Tuya LAN gateway probing helpers."""
+
+from __future__ import annotations
+
+import asyncio
+import socket
+from typing import Any
+
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from .const import (
+    CONF_TUYA_COUNTRY,
+    CONF_TUYA_EMAIL,
+    CONF_TUYA_PASSWORD,
+    CONF_TUYA_REGION,
+)
+from .tuya_cloud import TuyaMobileAPIAsync
+
+DEVICE_ID_KEYS = ("devId", "id", "device_id")
+LOCAL_KEY_KEYS = ("localKey", "local_key", "localkey")
+HOST_KEYS = ("ip", "localIp", "local_ip", "ipAddr", "ipaddr", "host", "address")
+NODE_ID_KEYS = ("nodeId", "node_id", "cid", "meshId")
+GATEWAY_MARKERS = ("gateway", "网关", "bluetooth", "ble", "lan ya")
+LAN_PORTS = (6668, 6667, 6666)
+LAN_PROTOCOL_VERSIONS = (3.4, 3.5, 3.3)
+
+
+def _first_string(device: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = device.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def extract_lan_details(device: dict[str, Any] | None) -> dict[str, str]:
+    """Extract common LAN fields from Tuya mobile/cloud device metadata."""
+    device = device or {}
+    return {
+        "device_id": _first_string(device, DEVICE_ID_KEYS),
+        "local_key": _first_string(device, LOCAL_KEY_KEYS),
+        "host": _first_string(device, HOST_KEYS),
+        "node_id": _first_string(device, NODE_ID_KEYS),
+    }
+
+
+def _is_gateway_like(device: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(device.get(key, ""))
+        for key in ("name", "productName", "product_name", "model", "category", "productId")
+    ).lower()
+    return any(marker in text for marker in GATEWAY_MARKERS)
+
+
+def select_gateway_candidate(
+    lock_device_id: str,
+    devices: list[dict[str, Any]],
+    *,
+    explicit_gateway_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Choose the most likely parent gateway for a Tuya subdevice."""
+    if explicit_gateway_id:
+        for device in devices:
+            if extract_lan_details(device)["device_id"] == explicit_gateway_id:
+                return device
+        return None
+
+    lock_device = None
+    for device in devices:
+        if extract_lan_details(device)["device_id"] == lock_device_id:
+            lock_device = device
+            break
+    lock_details = extract_lan_details(lock_device)
+
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for device in devices:
+        details = extract_lan_details(device)
+        device_id = details["device_id"]
+        if not device_id or device_id == lock_device_id:
+            continue
+        score = 0
+        if lock_details["local_key"] and details["local_key"] == lock_details["local_key"]:
+            score += 100
+        if not details["node_id"]:
+            score += 20
+        if _is_gateway_like(device):
+            score += 20
+        if details["host"]:
+            score += 10
+        if score:
+            scored.append((score, device))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
+def _redact_device_summary(device: dict[str, Any]) -> dict[str, Any]:
+    details = extract_lan_details(device)
+    return {
+        "device_id": details["device_id"],
+        "name": device.get("name") or device.get("productName") or device.get("product_name"),
+        "category": device.get("category"),
+        "product_id": device.get("productId") or device.get("product_id"),
+        "host": details["host"],
+        "node_id": details["node_id"],
+        "local_key_present": bool(details["local_key"]),
+        "online": device.get("online") if "online" in device else device.get("isOnline"),
+        "gid": device.get("gid"),
+    }
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, dict):
+        return {str(key): _jsonable(inner) for key, inner in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(inner) for inner in value]
+    return repr(value)
+
+
+def _call_result(func, *args) -> dict[str, Any]:
+    try:
+        return {"ok": True, "value": _jsonable(func(*args))}
+    except Exception as exc:  # pragma: no cover - exact tinytuya exceptions vary by version
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def probe_tcp_ports(host: str, ports: tuple[int, ...] = LAN_PORTS, timeout: float = 2.0) -> list[dict[str, Any]]:
+    """Check whether common Tuya LAN TCP ports accept connections."""
+    results = []
+    for port in ports:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                results.append({"port": port, "open": True})
+        except OSError as exc:
+            results.append({"port": port, "open": False, "error": f"{type(exc).__name__}: {exc}"})
+    return results
+
+
+def probe_tinytuya_gateway(
+    tinytuya_module,
+    *,
+    gateway_id: str,
+    host: str,
+    local_key: str,
+    child_id: str,
+    child_cid: str,
+    status_dps: tuple[int, ...],
+    versions: tuple[float, ...] = LAN_PROTOCOL_VERSIONS,
+    timeout: float = 4.0,
+) -> dict[str, Any]:
+    """Run read-only tinytuya checks against a gateway and optional child."""
+    attempts = []
+    for version in versions:
+        attempt: dict[str, Any] = {"version": version}
+        gateway = None
+        try:
+            gateway = tinytuya_module.Device(
+                gateway_id,
+                host,
+                local_key,
+                version=version,
+                connection_timeout=timeout,
+                connection_retry_limit=1,
+            )
+            if hasattr(gateway, "set_socketRetryLimit"):
+                gateway.set_socketRetryLimit(1)
+            if hasattr(gateway, "set_socketPersistent"):
+                gateway.set_socketPersistent(True)
+
+            attempt["gateway_status"] = _call_result(gateway.status)
+            attempt["subdevice_query"] = _call_result(gateway.subdev_query)
+
+            child = tinytuya_module.Device(child_id, cid=child_cid or child_id, parent=gateway)
+            attempt["subdevice_status"] = _call_result(child.status)
+            if status_dps:
+                attempt["subdevice_updatedps"] = _call_result(child.updatedps, list(status_dps))
+        except Exception as exc:
+            attempt["setup_error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if gateway is not None and hasattr(gateway, "set_socketPersistent"):
+                try:
+                    gateway.set_socketPersistent(False)
+                except Exception:
+                    pass
+        attempts.append(attempt)
+    return {"attempts": attempts}
+
+
+async def _async_fetch_mobile_inventory(
+    hass,
+    credentials: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    session = async_get_clientsession(hass)
+    client = TuyaMobileAPIAsync(session=session, region=credentials[CONF_TUYA_REGION])
+    login = await client.async_login(
+        credentials[CONF_TUYA_COUNTRY],
+        credentials[CONF_TUYA_EMAIL],
+        credentials[CONF_TUYA_PASSWORD],
+    )
+    if not login.get("success"):
+        return login, []
+
+    homes_resp = await client.async_get_home_list()
+    homes = homes_resp.get("result", {})
+    if isinstance(homes, dict):
+        homes = homes.get("result", [])
+    if not isinstance(homes, list):
+        homes = []
+
+    devices: list[dict[str, Any]] = []
+    for home in homes:
+        if not isinstance(home, dict):
+            continue
+        gid = home.get("groupId") or home.get("gid")
+        if not gid:
+            continue
+        devs_resp = await client.async_list_devices(gid)
+        devs_result = devs_resp.get("result", {})
+        if isinstance(devs_result, dict):
+            devs_result = devs_result.get("result", [])
+        if not isinstance(devs_result, list):
+            continue
+        for item in devs_result:
+            if isinstance(item, dict):
+                device = dict(item)
+                device["gid"] = gid
+                devices.append(device)
+    return login, devices
+
+
+async def async_probe_gateway_lan(
+    hass,
+    *,
+    credentials: dict[str, Any],
+    lock_device_id: str,
+    gateway_device_id: str | None = None,
+    host: str | None = None,
+    status_dps: tuple[int, ...] = (),
+    timeout: float = 4.0,
+) -> dict[str, Any]:
+    """Discover gateway metadata and run read-only LAN probes from Home Assistant."""
+    login, devices = await _async_fetch_mobile_inventory(hass, credentials)
+    result: dict[str, Any] = {
+        "lock_device_id": lock_device_id,
+        "login_success": bool(login.get("success")),
+        "device_count": len(devices),
+        "devices": [_redact_device_summary(device) for device in devices],
+    }
+    if not login.get("success"):
+        result["login_response"] = _jsonable(login)
+        return result
+
+    lock_device = next(
+        (device for device in devices if extract_lan_details(device)["device_id"] == lock_device_id),
+        None,
+    )
+    gateway_device = select_gateway_candidate(
+        lock_device_id,
+        devices,
+        explicit_gateway_id=gateway_device_id,
+    )
+    result["lock"] = _redact_device_summary(lock_device or {})
+    result["gateway"] = _redact_device_summary(gateway_device or {})
+
+    lock_details = extract_lan_details(lock_device)
+    gateway_details = extract_lan_details(gateway_device)
+    gateway_host = host or gateway_details["host"]
+    local_key = gateway_details["local_key"] or lock_details["local_key"]
+    gateway_id = gateway_details["device_id"] or gateway_device_id or ""
+    child_cid = lock_details["node_id"] or lock_device_id
+
+    result["probe_input"] = {
+        "gateway_id": gateway_id,
+        "host": gateway_host,
+        "child_id": lock_device_id,
+        "child_cid": child_cid,
+        "local_key_present": bool(local_key),
+        "status_dps": list(status_dps),
+    }
+    if not gateway_id or not gateway_host or not local_key:
+        result["probe_skipped"] = "missing gateway_id, host, or local_key"
+        return result
+
+    result["tcp_ports"] = await hass.async_add_executor_job(
+        probe_tcp_ports,
+        gateway_host,
+        LAN_PORTS,
+        min(timeout, 3.0),
+    )
+
+    def _run_tinytuya_probe() -> dict[str, Any]:
+        try:
+            import tinytuya
+        except ImportError as exc:
+            return {"available": False, "error": f"ImportError: {exc}"}
+        probe = probe_tinytuya_gateway(
+            tinytuya,
+            gateway_id=gateway_id,
+            host=gateway_host,
+            local_key=local_key,
+            child_id=lock_device_id,
+            child_cid=child_cid,
+            status_dps=status_dps,
+            timeout=timeout,
+        )
+        probe["available"] = True
+        return probe
+
+    result["tinytuya"] = await hass.async_add_executor_job(_run_tinytuya_probe)
+    return result

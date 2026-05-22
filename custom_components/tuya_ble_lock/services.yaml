@@ -165,3 +165,40 @@ create_temp_password:
       required: true
       selector:
         datetime:
+
+probe_gateway_lan:
+  name: Probe gateway LAN
+  description: >
+    Run read-only diagnostics from Home Assistant to determine whether the Tuya
+    BLE-to-WiFi gateway exposes the lock through the local Tuya LAN protocol.
+    This does not lock or unlock the door.
+  fields:
+    device_id:
+      name: Lock device
+      required: true
+      selector:
+        device:
+          integration: tuya_ble_lock
+    gateway_device_id:
+      name: Tuya gateway device ID
+      description: Optional explicit Tuya device ID for the gateway.
+      required: false
+      selector:
+        text:
+    host:
+      name: Gateway host
+      description: Optional gateway LAN IP or hostname override.
+      required: false
+      selector:
+        text:
+    timeout:
+      name: Timeout
+      description: Per-attempt timeout in seconds.
+      required: false
+      default: 4
+      selector:
+        number:
+          min: 1
+          max: 15
+          step: 1
+          mode: box

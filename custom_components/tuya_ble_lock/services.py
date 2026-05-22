@@ -73,6 +73,13 @@ CREATE_TEMP_PASSWORD_SCHEMA = vol.Schema({
     vol.Required("expiry_time"): str,
 })
 
+PROBE_GATEWAY_LAN_SCHEMA = vol.Schema({
+    vol.Required("device_id"): str,
+    vol.Optional("gateway_device_id"): str,
+    vol.Optional("host"): str,
+    vol.Optional("timeout", default=4.0): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=15.0)),
+})
+
 
 def _resolve_member_name(hass: HomeAssistant, call_data: dict) -> str:
     """Resolve person entity or member_name to a friendly name."""
@@ -394,9 +401,33 @@ async def async_register_services(hass: HomeAssistant) -> None:
             })
         return {"credentials": result}
 
+    async def handle_probe_gateway_lan(call: ServiceCall):
+        device_id = call.data["device_id"]
+        entry, data = _get_entry_and_data(hass, device_id)
+        coordinator = data.coordinator
+        credentials = coordinator._cloud_credentials()
+        if not credentials:
+            raise HomeAssistantError("Tuya cloud credentials are missing for this lock")
+        lock_device_id = coordinator._device_id_from_virtual_id()
+        if not lock_device_id:
+            raise HomeAssistantError("Tuya device ID is missing for this lock")
+
+        from .tuya_lan_probe import async_probe_gateway_lan
+
+        return await async_probe_gateway_lan(
+            hass,
+            credentials=credentials,
+            lock_device_id=lock_device_id,
+            gateway_device_id=call.data.get("gateway_device_id"),
+            host=call.data.get("host"),
+            status_dps=coordinator._status_sync_dps(),
+            timeout=call.data["timeout"],
+        )
+
     hass.services.async_register(DOMAIN, "add_pin", handle_add_pin, schema=ADD_PIN_SCHEMA)
     hass.services.async_register(DOMAIN, "add_fingerprint", handle_add_fingerprint, schema=ADD_FINGERPRINT_SCHEMA)
     hass.services.async_register(DOMAIN, "add_card", handle_add_card, schema=ADD_CARD_SCHEMA)
     hass.services.async_register(DOMAIN, "delete_credential", handle_delete_credential, schema=DELETE_CREDENTIAL_SCHEMA)
     hass.services.async_register(DOMAIN, "list_credentials", handle_list_credentials, schema=LIST_CREDENTIALS_SCHEMA, supports_response=SupportsResponse.OPTIONAL)
     hass.services.async_register(DOMAIN, "create_temp_password", handle_create_temp_password, schema=CREATE_TEMP_PASSWORD_SCHEMA)
+    hass.services.async_register(DOMAIN, "probe_gateway_lan", handle_probe_gateway_lan, schema=PROBE_GATEWAY_LAN_SCHEMA, supports_response=SupportsResponse.OPTIONAL)
