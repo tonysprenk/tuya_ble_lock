@@ -162,6 +162,93 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_background_poll_disconnects_when_it_opened_ble_connection(self):
+        async def scenario():
+            coordinator, session = self.make_coordinator()
+            session.is_connected = False
+            fetched = False
+
+            async def refresh_status_from_cloud():
+                return False
+
+            async def fetch_status():
+                nonlocal fetched
+                fetched = True
+
+            coordinator._async_refresh_status_from_cloud = refresh_status_from_cloud
+            coordinator._fetch_status = fetch_status
+
+            await coordinator._async_update_data()
+
+            self.assertTrue(fetched)
+            self.assertFalse(session.is_connected)
+
+        asyncio.run(scenario())
+
+    def test_unlock_refreshes_cloud_payload_before_command(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["entities"]["lock"]["use_cloud_check_payload"] = True
+            events = []
+
+            async def refresh_check_code_from_cloud(*, force=False):
+                events.append(f"refresh:{force}")
+
+            async def pair_central_from_cloud():
+                events.append("pair")
+
+            async def send_lock_action(*, action_unlock, allow_retry):
+                self.assertTrue(action_unlock)
+                self.assertTrue(allow_retry)
+                events.append("send")
+
+            coordinator._async_refresh_check_code_from_cloud = refresh_check_code_from_cloud
+            coordinator._async_pair_central_from_cloud = pair_central_from_cloud
+            coordinator._async_send_lock_action = send_lock_action
+
+            await coordinator.async_unlock()
+
+            self.assertEqual(events, ["refresh:True", "pair", "send"])
+
+        asyncio.run(scenario())
+
+    def test_cloud_status_refresh_uses_credentials_from_entry_data(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            module = self.coordinator_module
+            coordinator._entry.options = {}
+            coordinator._entry.data.update(
+                {
+                    module.CONF_TUYA_EMAIL: "user@example.com",
+                    module.CONF_TUYA_PASSWORD: "secret",
+                    module.CONF_TUYA_COUNTRY: "31",
+                    module.CONF_TUYA_REGION: "eu",
+                }
+            )
+            coordinator._profile["status_sync_dps"] = [47]
+            coordinator._profile["state_map"] = {"47": {"key": "motor_state", "parse": "bool"}}
+
+            async def fetch_cloud_lock_bundle(*args, **kwargs):
+                self.assertEqual(kwargs["email"], "user@example.com")
+                self.assertEqual(kwargs["password"], "secret")
+                self.assertEqual(kwargs["country_code"], "31")
+                self.assertEqual(kwargs["region"], "eu")
+                self.assertEqual(kwargs["device_id"], "ty-device")
+                self.assertEqual(kwargs["source_dps"], (47,))
+                return {"raw_dps": {47: b"\x01"}}
+
+            old_fetch = module.async_fetch_cloud_lock_bundle
+            module.async_fetch_cloud_lock_bundle = fetch_cloud_lock_bundle
+            try:
+                refreshed = await coordinator._async_refresh_status_from_cloud()
+            finally:
+                module.async_fetch_cloud_lock_bundle = old_fetch
+
+            self.assertTrue(refreshed)
+            self.assertEqual(coordinator.state["motor_state"], True)
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

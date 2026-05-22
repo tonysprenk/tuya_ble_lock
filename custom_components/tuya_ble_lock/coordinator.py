@@ -29,8 +29,8 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_CHECK_CODE = b"12345678"
 DEFAULT_CHECK_CODE_SOURCE_DPS = (73, 71)
 
-# Keep BLE connection alive for this long after last operation
-IDLE_DISCONNECT_SECONDS = 60
+# Keep command BLE sessions short so the Tuya app/gateway can reconnect quickly.
+IDLE_DISCONNECT_SECONDS = 10
 
 
 class TuyaBLELockCoordinator(DataUpdateCoordinator):
@@ -177,29 +177,41 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
     async def async_one_shot_status(self) -> None:
         """Single-attempt status fetch at startup. No retries."""
         async with self._op_lock:
+            opened_connection = not self._session_ready()
             try:
                 if not await self._session.async_connect_single_attempt():
                     _LOGGER.debug("One-shot status: lock not responding, skipping")
                     return
                 await self._fetch_status()
-                self._reset_idle_timer()
             except Exception as exc:
                 _LOGGER.debug("One-shot status failed: %s", exc)
-                await self._session.async_disconnect()
+            finally:
+                if opened_connection:
+                    await self._session.async_disconnect()
+                elif self._session_ready():
+                    self._reset_idle_timer()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Connect to the lock and refresh all status DPs."""
         async with self._op_lock:
+            opened_connection = False
+            used_ble = False
             try:
                 if await self._async_refresh_status_from_cloud():
                     return self.state
+                opened_connection = not self._session_ready()
                 await self._async_ensure_connected()
+                used_ble = True
                 await self._fetch_status()
-                self._reset_idle_timer()
             except UpdateFailed:
                 _LOGGER.debug("Poll: BLE connect failed, returning stale state")
             except Exception as exc:
                 _LOGGER.warning("Poll error: %s", exc)
+            finally:
+                if opened_connection:
+                    await self._session.async_disconnect()
+                elif used_ble and self._session_ready():
+                    self._reset_idle_timer()
         return self.state
 
     def _session_ready(self) -> bool:
@@ -296,6 +308,25 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         except (TypeError, ValueError):
             return 300.0
 
+    def _cloud_credentials(self) -> dict[str, Any] | None:
+        """Return Tuya cloud credentials from options, falling back to data.
+
+        Older or repaired entries can have an empty options object.  Newer
+        reconfigure flows mirror the credentials into data so cloud sync still
+        works when options are not exposed or preserved by Home Assistant.
+        """
+        options = self._entry.options or {}
+        data = self._entry.data or {}
+        credentials = {
+            CONF_TUYA_EMAIL: options.get(CONF_TUYA_EMAIL) or data.get(CONF_TUYA_EMAIL),
+            CONF_TUYA_PASSWORD: options.get(CONF_TUYA_PASSWORD) or data.get(CONF_TUYA_PASSWORD),
+            CONF_TUYA_COUNTRY: options.get(CONF_TUYA_COUNTRY) or data.get(CONF_TUYA_COUNTRY),
+            CONF_TUYA_REGION: options.get(CONF_TUYA_REGION) or data.get(CONF_TUYA_REGION),
+        }
+        if not all(credentials.values()):
+            return None
+        return credentials
+
     async def _async_refresh_check_code_from_cloud(self, *, force: bool = False) -> None:
         """Fetch the latest rotating check code from Tuya cloud when available."""
         if not force and self._cloud_check_payloads:
@@ -303,12 +334,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             if elapsed < self._cloud_refresh_interval_seconds():
                 return
 
-        options = self._entry.options
-        email = options.get(CONF_TUYA_EMAIL)
-        password = options.get(CONF_TUYA_PASSWORD)
-        country = options.get(CONF_TUYA_COUNTRY)
-        region = options.get(CONF_TUYA_REGION)
-        if not all((email, password, country, region)):
+        credentials = self._cloud_credentials()
+        if not credentials:
             if force:
                 _LOGGER.warning(
                     "Cannot refresh Tuya cloud check code for %s: cloud credentials are missing",
@@ -337,10 +364,10 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         try:
             cloud_bundle = await async_fetch_cloud_lock_bundle(
                 self.hass,
-                email=email,
-                password=password,
-                country_code=country,
-                region=region,
+                email=credentials[CONF_TUYA_EMAIL],
+                password=credentials[CONF_TUYA_PASSWORD],
+                country_code=credentials[CONF_TUYA_COUNTRY],
+                region=credentials[CONF_TUYA_REGION],
                 device_id=device_id,
                 source_dps=source_dps,
             )
@@ -383,12 +410,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         source_dps = self._status_sync_dps()
         if not source_dps:
             return False
-        options = self._entry.options
-        email = options.get(CONF_TUYA_EMAIL)
-        password = options.get(CONF_TUYA_PASSWORD)
-        country = options.get(CONF_TUYA_COUNTRY)
-        region = options.get(CONF_TUYA_REGION)
-        if not all((email, password, country, region)):
+        credentials = self._cloud_credentials()
+        if not credentials:
             return False
         device_id = self._device_id_from_virtual_id()
         if not device_id:
@@ -396,10 +419,10 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         try:
             cloud_bundle = await async_fetch_cloud_lock_bundle(
                 self.hass,
-                email=email,
-                password=password,
-                country_code=country,
-                region=region,
+                email=credentials[CONF_TUYA_EMAIL],
+                password=credentials[CONF_TUYA_PASSWORD],
+                country_code=credentials[CONF_TUYA_COUNTRY],
+                region=credentials[CONF_TUYA_REGION],
                 device_id=device_id,
                 source_dps=source_dps,
             )
@@ -615,12 +638,18 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     async def async_lock(self) -> None:
         async with self._op_lock:
+            await self._async_refresh_check_code_from_cloud(
+                force=bool(self._lock_cfg().get("use_cloud_check_payload"))
+            )
             await self._async_ensure_connected()
             await self._async_pair_central_from_cloud()
             await self._async_send_lock_action(action_unlock=False, allow_retry=True)
 
     async def async_unlock(self) -> None:
         async with self._op_lock:
+            await self._async_refresh_check_code_from_cloud(
+                force=bool(self._lock_cfg().get("use_cloud_check_payload"))
+            )
             await self._async_ensure_connected()
             await self._async_pair_central_from_cloud()
             await self._async_send_lock_action(action_unlock=True, allow_retry=True)

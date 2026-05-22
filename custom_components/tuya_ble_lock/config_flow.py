@@ -427,6 +427,7 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_TUYA_COUNTRY: self._country,
                 CONF_TUYA_REGION: self._region,
             }
+            data.update(options)
             return self.async_create_entry(
                 title=self._name or self._mac, data=data, options=options
             )
@@ -485,15 +486,15 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data[CONF_LOGIN_KEY] = login_key.hex()
             data[CONF_VIRTUAL_ID] = virtual_id.hex()
 
+        cloud_credentials = {
+            CONF_TUYA_EMAIL: email,
+            CONF_TUYA_PASSWORD: password,
+            CONF_TUYA_COUNTRY: country,
+            CONF_TUYA_REGION: region,
+        }
+        data.update(cloud_credentials)
         options = dict(entry.options)
-        options.update(
-            {
-                CONF_TUYA_EMAIL: email,
-                CONF_TUYA_PASSWORD: password,
-                CONF_TUYA_COUNTRY: country,
-                CONF_TUYA_REGION: region,
-            }
-        )
+        options.update(cloud_credentials)
         self.hass.config_entries.async_update_entry(entry, data=data, options=options)
         await self.hass.config_entries.async_reload(entry.entry_id)
         return self.async_abort(reason=success_reason)
