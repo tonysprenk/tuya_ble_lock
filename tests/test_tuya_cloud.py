@@ -175,6 +175,64 @@ class TuyaCloudTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_openapi_get_mqtt_config_uses_access_config_endpoint(self):
+        async def scenario():
+            class FakeResponse:
+                def __init__(self, payload):
+                    self.payload = payload
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+                def raise_for_status(self):
+                    return None
+
+                async def json(self, *, content_type=None):
+                    return self.payload
+
+            class FakeSession:
+                def __init__(self):
+                    self.calls = []
+                    self.responses = [
+                        {"success": True, "result": {"access_token": "token", "uid": "uid-1"}},
+                        {"success": True, "result": {"source_topic": "topic"}},
+                    ]
+
+                def request(self, method, url, **kwargs):
+                    self.calls.append((method, url, kwargs))
+                    return FakeResponse(self.responses.pop(0))
+
+            session = FakeSession()
+            client = self.tuya_cloud.TuyaOpenAPIAsync(
+                session,
+                region="eu",
+                access_id="access-id",
+                access_secret="access-secret",
+            )
+
+            result = await client.async_get_open_hub_config("link-1")
+
+            self.assertTrue(result["success"])
+            self.assertEqual(session.calls[0][0], "GET")
+            self.assertEqual(session.calls[0][1], "https://openapi.tuyaeu.com/v1.0/token")
+            self.assertEqual(session.calls[0][2]["params"], {"grant_type": "1"})
+            self.assertEqual(session.calls[1][0], "POST")
+            self.assertEqual(
+                session.calls[1][1],
+                "https://openapi.tuyaeu.com/v1.0/iot-03/open-hub/access-config",
+            )
+            self.assertEqual(
+                session.calls[1][2]["data"],
+                '{"uid":"uid-1","link_id":"link-1","link_type":"mqtt","topics":"device","msg_encrypted_version":"1.0"}',
+            )
+
+        import asyncio
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ import os
 import time
 import uuid as uuid_mod
 import base64
+from urllib.parse import urlencode
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -35,6 +36,14 @@ MOBILE_REGIONS = {
     "cn": "https://a1.tuyacn.com",
     "in": "https://a1.tuyain.com",
     "nz": "https://a1.tuyaus.com",
+}
+
+OPENAPI_REGIONS = {
+    "us": "https://openapi.tuyaus.com",
+    "eu": "https://openapi.tuyaeu.com",
+    "cn": "https://openapi.tuyacn.com",
+    "in": "https://openapi.tuyain.com",
+    "nz": "https://openapi.tuyaus.com",
 }
 
 SIGN_PARAMS = [
@@ -314,6 +323,102 @@ class TuyaMobileAPIAsync:
                         "raw": dev,
                     }
         return None
+
+
+class TuyaOpenAPIAsync:
+    """Small async Tuya OpenAPI client for open-hub MQTT status sync."""
+
+    def __init__(
+        self,
+        session,
+        *,
+        region: str,
+        access_id: str,
+        access_secret: str,
+    ) -> None:
+        self._session = session
+        self.base_url = OPENAPI_REGIONS.get(region, OPENAPI_REGIONS["us"])
+        self.access_id = access_id
+        self.access_secret = access_secret
+        self.access_token = ""
+        self.uid = ""
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not self.access_token and path != "/v1.0/token":
+            await self.async_get_token()
+
+        params = {key: str(value) for key, value in (params or {}).items() if value is not None}
+        body_text = json.dumps(body, separators=(",", ":")) if body is not None else ""
+        timestamp = str(int(time.time() * 1000))
+        nonce = uuid_mod.uuid4().hex
+        content_hash = hashlib.sha256(body_text.encode()).hexdigest()
+        sign_url = _openapi_sign_url(path, params)
+        string_to_sign = f"{method.upper()}\n{content_hash}\nclient_id:{self.access_id}\n\n{sign_url}"
+        sign_payload = f"{self.access_id}{self.access_token}{timestamp}{nonce}{string_to_sign}"
+        sign = hmac.new(
+            self.access_secret.encode(),
+            sign_payload.encode(),
+            hashlib.sha256,
+        ).hexdigest().upper()
+        headers = {
+            "client_id": self.access_id,
+            "sign": sign,
+            "t": timestamp,
+            "sign_method": "HMAC-SHA256",
+            "nonce": nonce,
+            "Signature-Headers": "client_id",
+            "Content-Type": "application/json",
+        }
+        if self.access_token:
+            headers["access_token"] = self.access_token
+
+        async with self._session.request(
+            method.upper(),
+            self.base_url + path,
+            params=params or None,
+            data=body_text if body is not None else None,
+            headers=headers,
+        ) as resp:
+            resp.raise_for_status()
+            result = await resp.json(content_type=None)
+            _LOGGER.debug("Tuya OpenAPI response: %s", _redact_cloud_value(result))
+            return result
+
+    async def async_get_token(self) -> dict[str, Any]:
+        result = await self._request("GET", "/v1.0/token", params={"grant_type": "1"})
+        if result.get("success"):
+            token = result.get("result", {})
+            self.access_token = token.get("access_token", "")
+            self.uid = token.get("uid", "")
+        return result
+
+    async def async_get_open_hub_config(self, link_id: str) -> dict[str, Any]:
+        if not self.uid:
+            await self.async_get_token()
+        return await self._request(
+            "POST",
+            "/v1.0/iot-03/open-hub/access-config",
+            body={
+                "uid": self.uid,
+                "link_id": link_id,
+                "link_type": "mqtt",
+                "topics": "device",
+                "msg_encrypted_version": "1.0",
+            },
+        )
+
+
+def _openapi_sign_url(path: str, params: dict[str, str]) -> str:
+    if not params:
+        return path
+    return f"{path}?{urlencode(sorted(params.items()))}"
 
 
 def _redact_cloud_value(value: Any) -> Any:

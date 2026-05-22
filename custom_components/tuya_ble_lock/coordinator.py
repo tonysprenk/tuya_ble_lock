@@ -20,6 +20,8 @@ from .const import (
     CONF_TUYA_EMAIL,
     CONF_TUYA_PASSWORD,
     CONF_TUYA_REGION,
+    CONF_TUYA_ACCESS_ID,
+    CONF_TUYA_ACCESS_SECRET,
 )
 from .device_profiles import parse_dp_value
 from .tuya_cloud import async_fetch_cloud_lock_bundle
@@ -393,8 +395,19 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             CONF_TUYA_COUNTRY: options.get(CONF_TUYA_COUNTRY) or data.get(CONF_TUYA_COUNTRY),
             CONF_TUYA_REGION: options.get(CONF_TUYA_REGION) or data.get(CONF_TUYA_REGION),
         }
-        if not all(credentials.values()):
+        required = (
+            CONF_TUYA_EMAIL,
+            CONF_TUYA_PASSWORD,
+            CONF_TUYA_COUNTRY,
+            CONF_TUYA_REGION,
+        )
+        if not all(credentials[key] for key in required):
             return None
+        access_id = options.get(CONF_TUYA_ACCESS_ID) or data.get(CONF_TUYA_ACCESS_ID)
+        access_secret = options.get(CONF_TUYA_ACCESS_SECRET) or data.get(CONF_TUYA_ACCESS_SECRET)
+        if access_id and access_secret:
+            credentials[CONF_TUYA_ACCESS_ID] = access_id
+            credentials[CONF_TUYA_ACCESS_SECRET] = access_secret
         return credentials
 
     async def _async_refresh_check_code_from_cloud(self, *, force: bool = False) -> None:

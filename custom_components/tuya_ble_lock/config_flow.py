@@ -27,6 +27,8 @@ from .const import (
     CONF_TUYA_PASSWORD,
     CONF_TUYA_COUNTRY,
     CONF_TUYA_REGION,
+    CONF_TUYA_ACCESS_ID,
+    CONF_TUYA_ACCESS_SECRET,
 )
 from .device_profiles import async_get_profile_choices
 from .tuya_cloud import async_fetch_auth_key, async_fetch_auth_key_only
@@ -54,6 +56,8 @@ STEP_CLOUD_SCHEMA = vol.Schema({
     vol.Required(CONF_PASSWORD): str,
     vol.Required("country_code", description={"suggested_value": "1"}): str,
     vol.Required("region", default="us"): vol.In(["us", "eu", "cn", "in"]),
+    vol.Optional(CONF_TUYA_ACCESS_ID): str,
+    vol.Optional(CONF_TUYA_ACCESS_SECRET): str,
 })
 
 STEP_MANUAL_AUTH_SCHEMA = vol.Schema({
@@ -86,6 +90,8 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._password = None
         self._country = None
         self._region = None
+        self._access_id = None
+        self._access_secret = None
         self._login_key = None
         self._virtual_id = None
         self._cloud_local_key = None
@@ -219,6 +225,8 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._password = user_input[CONF_PASSWORD]
             self._country = user_input["country_code"]
             self._region = user_input["region"]
+            self._access_id = user_input.get(CONF_TUYA_ACCESS_ID) or ""
+            self._access_secret = user_input.get(CONF_TUYA_ACCESS_SECRET) or ""
             _LOGGER.debug(
                 "Fetching auth key: uuid=%r, mac=%r, region=%s",
                 self._uuid, self._mac, self._region,
@@ -427,6 +435,9 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_TUYA_COUNTRY: self._country,
                 CONF_TUYA_REGION: self._region,
             }
+            if self._access_id and self._access_secret:
+                options[CONF_TUYA_ACCESS_ID] = self._access_id
+                options[CONF_TUYA_ACCESS_SECRET] = self._access_secret
             data.update(options)
             return self.async_create_entry(
                 title=self._name or self._mac, data=data, options=options
@@ -453,6 +464,8 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         password = user_input[CONF_PASSWORD]
         country = user_input["country_code"]
         region = user_input["region"]
+        access_id = user_input.get(CONF_TUYA_ACCESS_ID) or ""
+        access_secret = user_input.get(CONF_TUYA_ACCESS_SECRET) or ""
         data = dict(entry.data)
 
         try:
@@ -492,8 +505,17 @@ class TuyaBLELockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_TUYA_COUNTRY: country,
             CONF_TUYA_REGION: region,
         }
+        if access_id and access_secret:
+            cloud_credentials[CONF_TUYA_ACCESS_ID] = access_id
+            cloud_credentials[CONF_TUYA_ACCESS_SECRET] = access_secret
         data.update(cloud_credentials)
         options = dict(entry.options)
+        if not access_id:
+            options.pop(CONF_TUYA_ACCESS_ID, None)
+            data.pop(CONF_TUYA_ACCESS_ID, None)
+        if not access_secret:
+            options.pop(CONF_TUYA_ACCESS_SECRET, None)
+            data.pop(CONF_TUYA_ACCESS_SECRET, None)
         options.update(cloud_credentials)
         self.hass.config_entries.async_update_entry(entry, data=data, options=options)
         await self.hass.config_entries.async_reload(entry.entry_id)

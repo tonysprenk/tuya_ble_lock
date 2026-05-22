@@ -93,6 +93,8 @@ During setup, the integration logs into the Tuya cloud API on your behalf to ret
 
 Some gateway-sync profiles intentionally keep the Tuya app credentials in the config entry so Home Assistant can receive Tuya gateway status events and send commands through the same path as the app. Use those profiles when you need Home Assistant, HomeKit, and the Tuya app to stay synchronized.
 
+Gateway status events use Tuya's documented OpenAPI MQTT status stream. For these profiles, add your Tuya IoT Platform **Access ID** and **Access Secret** in the integration reconfigure flow. The normal Tuya app email/password are still used for setup, check-code refresh, and mobile/gateway command fallback.
+
 If you prefer to avoid cloud credentials entirely, use the **Manual Auth Key** method and provide the auth key directly.
 
 ### Coexistence with the Tuya App

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import json
 import logging
 import uuid
@@ -170,33 +169,29 @@ class TuyaGatewayStatusListener:
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
         from .const import (
-            CONF_TUYA_COUNTRY,
-            CONF_TUYA_EMAIL,
-            CONF_TUYA_PASSWORD,
+            CONF_TUYA_ACCESS_ID,
+            CONF_TUYA_ACCESS_SECRET,
             CONF_TUYA_REGION,
         )
-        from .tuya_cloud import TuyaMobileAPIAsync
+        from .tuya_cloud import TuyaOpenAPIAsync
 
-        session = async_get_clientsession(self.hass)
-        stable_device_id = hashlib.sha256(
-            f"tuya_ble_lock_mqtt|{self.device_id}".encode()
-        ).hexdigest()
-        client = TuyaMobileAPIAsync(
-            session,
-            region=self._credentials[CONF_TUYA_REGION],
-            device_id=stable_device_id,
-        )
-        login_resp = await client.async_login(
-            self._credentials[CONF_TUYA_COUNTRY],
-            self._credentials[CONF_TUYA_EMAIL],
-            self._credentials[CONF_TUYA_PASSWORD],
-        )
-        if not login_resp.get("success"):
-            error = login_resp.get("errorMsg", login_resp.get("msg", "Login failed"))
-            _LOGGER.warning("Tuya gateway listener login failed for %s: %s", self.device_id, error)
+        access_id = self._credentials.get(CONF_TUYA_ACCESS_ID)
+        access_secret = self._credentials.get(CONF_TUYA_ACCESS_SECRET)
+        if not access_id or not access_secret:
+            _LOGGER.warning(
+                "Tuya gateway listener for %s requires Tuya IoT OpenAPI Access ID and Access Secret",
+                self.device_id,
+            )
             return False
 
-        mqtt_resp = await client.async_get_mqtt_config(_new_link_id())
+        session = async_get_clientsession(self.hass)
+        client = TuyaOpenAPIAsync(
+            session,
+            region=self._credentials[CONF_TUYA_REGION],
+            access_id=access_id,
+            access_secret=access_secret,
+        )
+        mqtt_resp = await client.async_get_open_hub_config(_new_link_id())
         if not mqtt_resp.get("success"):
             error = mqtt_resp.get("errorMsg", mqtt_resp.get("msg", "MQTT config failed"))
             _LOGGER.warning("Tuya gateway MQTT config failed for %s: %s", self.device_id, error)
@@ -229,7 +224,7 @@ class TuyaGatewayStatusListener:
         username = str(config.get("username") or "")
         password = str(config.get("password") or "")
         client_id = str(config.get("client_id") or "")
-        source_topic = str(config.get("source_topic") or "")
+        source_topic = _source_topic_from_config(config)
         if not all((url, username, password, client_id, source_topic)):
             _LOGGER.warning("Tuya gateway MQTT config missing required fields for %s", self.device_id)
             return False
@@ -326,6 +321,19 @@ def _parse_mqtt_url(url: str) -> tuple[str, int, bool]:
         except ValueError:
             return url, 1883, False
     return url, 1883, False
+
+
+def _source_topic_from_config(config: dict[str, Any]) -> str:
+    source_topic = config.get("source_topic")
+    if isinstance(source_topic, dict):
+        topic = source_topic.get("device")
+        if isinstance(topic, str):
+            return topic
+        for value in source_topic.values():
+            if isinstance(value, str):
+                return value
+        return ""
+    return str(source_topic or "")
 
 
 def _create_mqtt_client(mqtt, client_id: str):

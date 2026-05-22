@@ -68,6 +68,7 @@ def install_config_flow_stubs() -> None:
     voluptuous = types.ModuleType("voluptuous")
     voluptuous.Schema = lambda value: value
     voluptuous.Required = lambda key, *args, **kwargs: key
+    voluptuous.Optional = lambda key, *args, **kwargs: key
     voluptuous.In = lambda value: value
 
     homeassistant = sys.modules.get("homeassistant") or types.ModuleType("homeassistant")
@@ -186,6 +187,24 @@ class TuyaBLELockConfigFlowTest(unittest.TestCase):
             "country_code": "31",
             "region": "eu",
         }
+
+    def test_reconfigure_saves_tuya_openapi_credentials(self):
+        async def scenario():
+            flow, entry = self.make_flow(source="reconfigure")
+            self.install_successful_cloud_response()
+            user_input = self.cloud_credentials_input()
+            user_input[self.config_flow_module.CONF_TUYA_ACCESS_ID] = "access-id"
+            user_input[self.config_flow_module.CONF_TUYA_ACCESS_SECRET] = "access-secret"
+
+            result = await flow.async_step_reconfigure(user_input)
+
+            self.assertEqual(result, {"type": "abort", "reason": "reconfigure_successful"})
+            self.assertEqual(entry.options[self.config_flow_module.CONF_TUYA_ACCESS_ID], "access-id")
+            self.assertEqual(entry.options[self.config_flow_module.CONF_TUYA_ACCESS_SECRET], "access-secret")
+            self.assertEqual(entry.data[self.config_flow_module.CONF_TUYA_ACCESS_ID], "access-id")
+            self.assertEqual(entry.data[self.config_flow_module.CONF_TUYA_ACCESS_SECRET], "access-secret")
+
+        asyncio.run(scenario())
 
     def test_bluetooth_discovery_aborts_when_mac_already_configured(self):
         async def scenario():

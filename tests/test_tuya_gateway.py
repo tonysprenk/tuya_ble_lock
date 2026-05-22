@@ -145,6 +145,13 @@ class TuyaGatewayTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_source_topic_accepts_openapi_device_topic_object(self):
+        topic = self.gateway._source_topic_from_config(
+            {"source_topic": {"device": "cloud/token/in/device"}}
+        )
+
+        self.assertEqual(topic, "cloud/token/in/device")
+
 
 if __name__ == "__main__":
     unittest.main()
