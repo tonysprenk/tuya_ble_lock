@@ -46,6 +46,9 @@ OPENAPI_REGIONS = {
     "nz": "https://openapi.tuyaus.com",
 }
 
+OPENAPI_TOKEN_REFRESH_SKEW_SECONDS = 60
+_OPENAPI_TOKEN_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+
 SIGN_PARAMS = [
     "a", "v", "lat", "lon", "et", "lang", "deviceId",
     "imei", "imsi", "appVersion", "ttid", "isH5",
@@ -392,11 +395,36 @@ class TuyaOpenAPIAsync:
             return result
 
     async def async_get_token(self) -> dict[str, Any]:
+        cache_key = (self.base_url, self.access_id, self.access_secret)
+        cached = _OPENAPI_TOKEN_CACHE.get(cache_key)
+        if cached and time.monotonic() < cached["expires_at"]:
+            self.access_token = cached["access_token"]
+            self.uid = cached["uid"]
+            return {
+                "success": True,
+                "result": {
+                    "access_token": self.access_token,
+                    "uid": self.uid,
+                    "expire_time": int(cached["expires_at"] - time.monotonic()),
+                },
+            }
+
         result = await self._request("GET", "/v1.0/token", params={"grant_type": "1"})
         if result.get("success"):
             token = result.get("result", {})
             self.access_token = token.get("access_token", "")
             self.uid = token.get("uid", "")
+            expire_time = token.get("expire_time", 0)
+            try:
+                ttl = max(float(expire_time) - OPENAPI_TOKEN_REFRESH_SKEW_SECONDS, 0.0)
+            except (TypeError, ValueError):
+                ttl = 0.0
+            if self.access_token and ttl > 0:
+                _OPENAPI_TOKEN_CACHE[cache_key] = {
+                    "access_token": self.access_token,
+                    "uid": self.uid,
+                    "expires_at": time.monotonic() + ttl,
+                }
         return result
 
     async def async_get_open_hub_config(self, link_id: str) -> dict[str, Any]:

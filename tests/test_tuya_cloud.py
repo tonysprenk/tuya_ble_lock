@@ -43,6 +43,9 @@ class TuyaCloudTest(unittest.TestCase):
         sys.modules.pop("custom_components.tuya_ble_lock.tuya_cloud", None)
         cls.tuya_cloud = importlib.import_module("custom_components.tuya_ble_lock.tuya_cloud")
 
+    def setUp(self):
+        self.tuya_cloud._OPENAPI_TOKEN_CACHE.clear()
+
     def test_redacts_sensitive_cloud_log_values(self):
         redacted = self.tuya_cloud._redact_cloud_value(
             {
@@ -279,6 +282,77 @@ class TuyaCloudTest(unittest.TestCase):
                 session.calls[1][1],
                 "https://openapi.tuyaeu.com/v1.0/iot-03/devices/device-1/status",
             )
+
+        import asyncio
+
+        asyncio.run(scenario())
+
+    def test_openapi_token_cache_reused_between_clients(self):
+        async def scenario():
+            class FakeResponse:
+                def __init__(self, payload):
+                    self.payload = payload
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+                def raise_for_status(self):
+                    return None
+
+                async def json(self, *, content_type=None):
+                    return self.payload
+
+            class FakeSession:
+                def __init__(self):
+                    self.calls = []
+                    self.responses = [
+                        {
+                            "success": True,
+                            "result": {
+                                "access_token": "cached-token",
+                                "uid": "uid-1",
+                                "expire_time": 7200,
+                            },
+                        },
+                        {"success": True, "result": [{"code": "lock_motor_state", "value": True}]},
+                        {"success": True, "result": [{"code": "lock_motor_state", "value": False}]},
+                    ]
+
+                def request(self, method, url, **kwargs):
+                    self.calls.append((method, url, kwargs))
+                    return FakeResponse(self.responses.pop(0))
+
+            session = FakeSession()
+            client_one = self.tuya_cloud.TuyaOpenAPIAsync(
+                session,
+                region="eu",
+                access_id="access-id",
+                access_secret="access-secret",
+            )
+            client_two = self.tuya_cloud.TuyaOpenAPIAsync(
+                session,
+                region="eu",
+                access_id="access-id",
+                access_secret="access-secret",
+            )
+
+            await client_one.async_get_device_status("device-1")
+            await client_two.async_get_device_status("device-1")
+
+            token_calls = [
+                call for call in session.calls
+                if call[1] == "https://openapi.tuyaeu.com/v1.0/token"
+            ]
+            status_calls = [
+                call for call in session.calls
+                if call[1] == "https://openapi.tuyaeu.com/v1.0/iot-03/devices/device-1/status"
+            ]
+            self.assertEqual(len(token_calls), 1)
+            self.assertEqual(len(status_calls), 2)
+            self.assertEqual(status_calls[1][2]["headers"]["access_token"], "cached-token")
 
         import asyncio
 
