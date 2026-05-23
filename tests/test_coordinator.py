@@ -321,6 +321,33 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_gateway_lan_status_refresh_clears_cache_after_empty_reads(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["status_sync_dps"] = [47]
+            coordinator._profile["entities"]["lock"]["gateway_lan_status_listener"] = True
+            coordinator._gateway_lan_status_config = {
+                "gateway_id": "gw-1",
+                "host": "192.168.1.25",
+                "local_key": "key-1",
+                "child_id": "ty-device",
+                "child_cids": ("lock-uuid",),
+                "version": 3.4,
+                "timeout": 1.0,
+            }
+
+            def read_gateway_lan_status(config, source_dps):
+                return {"cid": "", "dps": []}
+
+            coordinator._read_gateway_lan_status = read_gateway_lan_status
+
+            self.assertFalse(await coordinator._async_refresh_status_from_gateway_lan())
+            self.assertFalse(await coordinator._async_refresh_status_from_gateway_lan())
+            self.assertFalse(await coordinator._async_refresh_status_from_gateway_lan())
+            self.assertIsNone(coordinator._gateway_lan_status_config)
+
+        asyncio.run(scenario())
+
     def test_unlock_refreshes_cloud_payload_before_command(self):
         async def scenario():
             coordinator, _session = self.make_coordinator()

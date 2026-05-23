@@ -538,19 +538,24 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     async def _gateway_lan_status_loop(self) -> None:
         poll_seconds = self._gateway_lan_status_poll_seconds()
-        try:
-            while True:
+        while True:
+            try:
                 refreshed = await self._async_refresh_status_from_gateway_lan()
-                sleep_seconds = (
-                    poll_seconds
-                    if refreshed or self._gateway_lan_status_config
-                    else GATEWAY_LAN_STATUS_RESOLVE_RETRY_SECONDS
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                refreshed = False
+                _LOGGER.debug(
+                    "Tuya gateway LAN status iteration failed for %s: %s",
+                    self._entry.title,
+                    exc,
                 )
-                await asyncio.sleep(sleep_seconds)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _LOGGER.debug("Tuya gateway LAN status loop stopped for %s: %s", self._entry.title, exc)
+            sleep_seconds = (
+                poll_seconds
+                if refreshed or self._gateway_lan_status_config
+                else GATEWAY_LAN_STATUS_RESOLVE_RETRY_SECONDS
+            )
+            await asyncio.sleep(sleep_seconds)
 
     def _gateway_lan_status_read_timeout_seconds(self, config: dict[str, Any]) -> float:
         value = self._lock_cfg().get("gateway_lan_status_read_timeout_seconds")
@@ -599,6 +604,14 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
         reports = result.get("dps") if isinstance(result, dict) else None
         if not reports:
+            self._gateway_lan_status_failures += 1
+            if self._gateway_lan_status_failures >= 3:
+                self._gateway_lan_status_config = None
+            _LOGGER.debug(
+                "Tuya gateway LAN status refresh returned no DPs for %s: %s",
+                self._entry.title,
+                result,
+            )
             return False
 
         self._gateway_lan_status_failures = 0
