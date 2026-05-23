@@ -120,6 +120,7 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
     def make_coordinator(self):
         session = FakeSession()
         profile = {
+            "status_sync_seconds": 2,
             "entities": {
                 "lock": {
                     "unlock_dp": 71,
@@ -212,6 +213,14 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_status_sync_interval_allows_two_second_cloud_fallback_poll(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+
+            self.assertEqual(coordinator.update_interval.total_seconds(), 2.0)
+
+        asyncio.run(scenario())
+
     def test_background_poll_uses_gateway_lan_status_before_cloud_or_ble(self):
         async def scenario():
             coordinator, session = self.make_coordinator()
@@ -243,6 +252,40 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
             await coordinator._async_update_data()
 
             self.assertTrue(coordinator.state["motor_state"])
+            self.assertFalse(session.is_connected)
+
+        asyncio.run(scenario())
+
+    def test_background_poll_uses_openapi_before_gateway_lan_when_enabled(self):
+        async def scenario():
+            coordinator, session = self.make_coordinator()
+            session.is_connected = False
+            coordinator._profile["entities"]["lock"].update(
+                {
+                    "openapi_status_sync": True,
+                    "gateway_lan_status_listener": True,
+                }
+            )
+            events = []
+
+            async def refresh_status_from_cloud():
+                events.append("cloud")
+                return True
+
+            async def refresh_status_from_gateway_lan():
+                events.append("lan")
+                raise AssertionError("LAN status should not run before enabled OpenAPI sync")
+
+            async def fetch_status():
+                raise AssertionError("BLE status should not run when OpenAPI succeeds")
+
+            coordinator._async_refresh_status_from_cloud = refresh_status_from_cloud
+            coordinator._async_refresh_status_from_gateway_lan = refresh_status_from_gateway_lan
+            coordinator._fetch_status = fetch_status
+
+            await coordinator._async_update_data()
+
+            self.assertEqual(events, ["cloud"])
             self.assertFalse(session.is_connected)
 
         asyncio.run(scenario())

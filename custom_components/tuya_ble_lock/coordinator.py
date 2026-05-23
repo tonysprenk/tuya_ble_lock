@@ -58,7 +58,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         status_sync_seconds = profile.get("status_sync_seconds")
         if status_sync_seconds is not None:
             try:
-                interval = timedelta(seconds=max(float(status_sync_seconds), 5.0))
+                interval = timedelta(seconds=max(float(status_sync_seconds), 2.0))
             except (TypeError, ValueError):
                 interval = timedelta(hours=12)
             self.update_interval = interval
@@ -239,9 +239,12 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             opened_connection = False
             used_ble = False
             try:
+                if self._lock_cfg().get("openapi_status_sync"):
+                    if await self._async_refresh_status_from_cloud():
+                        return self.state
                 if await self._async_refresh_status_from_gateway_lan():
                     return self.state
-                if await self._async_refresh_status_from_cloud():
+                if not self._lock_cfg().get("openapi_status_sync") and await self._async_refresh_status_from_cloud():
                     return self.state
                 opened_connection = not self._session_ready()
                 await self._async_ensure_connected()
