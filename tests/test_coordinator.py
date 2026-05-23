@@ -55,6 +55,9 @@ class FakeHass:
     def async_create_task(self, coro):
         return asyncio.create_task(coro)
 
+    async def async_add_executor_job(self, target, *args):
+        return target(*args)
+
 
 def install_coordinator_stubs() -> None:
     custom_components = sys.modules.get("custom_components") or types.ModuleType("custom_components")
@@ -201,6 +204,69 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
             self.assertTrue(fetched)
             self.assertFalse(session.is_connected)
+
+        asyncio.run(scenario())
+
+    def test_background_poll_uses_gateway_lan_status_before_cloud_or_ble(self):
+        async def scenario():
+            coordinator, session = self.make_coordinator()
+            session.is_connected = False
+            coordinator._profile["status_sync_dps"] = [47]
+            coordinator._profile["state_map"] = {"47": {"key": "motor_state", "parse": "bool"}}
+            coordinator._profile["entities"]["lock"]["gateway_lan_status_listener"] = True
+            coordinator._gateway_lan_status_config = {
+                "gateway_id": "gw-1",
+                "host": "192.168.1.25",
+                "local_key": "key-1",
+                "child_id": "ty-device",
+                "child_cids": ("lock-uuid",),
+                "version": 3.4,
+                "timeout": 1.0,
+            }
+
+            def read_gateway_lan_status(config, source_dps):
+                self.assertEqual(source_dps, (47,))
+                self.assertEqual(config["host"], "192.168.1.25")
+                return {"cid": "lock-uuid", "dps": [{"id": 47, "raw": b"\x01"}]}
+
+            async def fetch_status():
+                raise AssertionError("BLE status should not run when LAN status succeeds")
+
+            coordinator._read_gateway_lan_status = read_gateway_lan_status
+            coordinator._fetch_status = fetch_status
+
+            await coordinator._async_update_data()
+
+            self.assertTrue(coordinator.state["motor_state"])
+            self.assertFalse(session.is_connected)
+
+        asyncio.run(scenario())
+
+    def test_gateway_lan_status_refresh_clears_cache_after_repeated_failures(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["status_sync_dps"] = [47]
+            coordinator._profile["entities"]["lock"]["gateway_lan_status_listener"] = True
+            coordinator._gateway_lan_status_config = {
+                "gateway_id": "gw-1",
+                "host": "192.168.1.25",
+                "local_key": "key-1",
+                "child_id": "ty-device",
+                "child_cids": ("lock-uuid",),
+                "version": 3.4,
+                "timeout": 1.0,
+            }
+
+            def read_gateway_lan_status(config, source_dps):
+                raise TimeoutError("gateway did not answer")
+
+            coordinator._read_gateway_lan_status = read_gateway_lan_status
+
+            self.assertFalse(await coordinator._async_refresh_status_from_gateway_lan())
+            self.assertIsNotNone(coordinator._gateway_lan_status_config)
+            self.assertFalse(await coordinator._async_refresh_status_from_gateway_lan())
+            self.assertFalse(await coordinator._async_refresh_status_from_gateway_lan())
+            self.assertIsNone(coordinator._gateway_lan_status_config)
 
         asyncio.run(scenario())
 

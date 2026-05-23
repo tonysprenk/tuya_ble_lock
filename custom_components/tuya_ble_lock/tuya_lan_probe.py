@@ -181,6 +181,85 @@ def child_cid_candidates(
     return tuple(candidates)
 
 
+def _raw_bytes_from_lan_value(value: Any) -> bytes | None:
+    if isinstance(value, bool):
+        return b"\x01" if value else b"\x00"
+    if isinstance(value, int):
+        return int(value).to_bytes(4, "big", signed=False)
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        if not value:
+            return b""
+        return value.encode()
+    return None
+
+
+def extract_dps_from_lan_status(status: dict[str, Any] | None, status_dps: tuple[int, ...]) -> list[dict[str, Any]]:
+    """Convert a tinytuya LAN status response into coordinator DP reports."""
+    if not isinstance(status, dict):
+        return []
+    dps = status.get("dps")
+    if not isinstance(dps, dict):
+        return []
+
+    reports = []
+    for dp_id in status_dps:
+        value = dps.get(str(dp_id), dps.get(dp_id))
+        raw = _raw_bytes_from_lan_value(value)
+        if raw is not None:
+            reports.append({"id": dp_id, "raw": raw})
+    return reports
+
+
+def read_tinytuya_gateway_status(
+    tinytuya_module,
+    *,
+    gateway_id: str,
+    host: str,
+    local_key: str,
+    child_id: str,
+    child_cids: tuple[str, ...],
+    status_dps: tuple[int, ...],
+    version: float = 3.4,
+    timeout: float = 2.0,
+) -> dict[str, Any]:
+    """Read subdevice DPs through the local gateway without sending control commands."""
+    gateway = tinytuya_module.Device(
+        gateway_id,
+        host,
+        local_key,
+        version=version,
+        connection_timeout=timeout,
+        connection_retry_limit=1,
+    )
+    if hasattr(gateway, "set_socketRetryLimit"):
+        gateway.set_socketRetryLimit(1)
+    if hasattr(gateway, "set_socketPersistent"):
+        gateway.set_socketPersistent(True)
+
+    try:
+        subdevice_query = gateway.subdev_query()
+        cids = child_cid_candidates(
+            child_id,
+            explicit_child_cid=child_cids[0] if child_cids else "",
+            subdevice_query=subdevice_query,
+        )
+        for cid in tuple(dict.fromkeys((*cids, *child_cids, child_id))):
+            child = tinytuya_module.Device(child_id, cid=cid, parent=gateway)
+            status = child.status()
+            reports = extract_dps_from_lan_status(status, status_dps)
+            if reports:
+                return {"cid": cid, "status": _jsonable(status), "dps": reports}
+        return {"cid": "", "status": None, "dps": []}
+    finally:
+        if hasattr(gateway, "set_socketPersistent"):
+            try:
+                gateway.set_socketPersistent(False)
+            except Exception:
+                pass
+
+
 def probe_tcp_ports(host: str, ports: tuple[int, ...] = LAN_PORTS, timeout: float = 2.0) -> list[dict[str, Any]]:
     """Check whether common Tuya LAN TCP ports accept connections."""
     results = []

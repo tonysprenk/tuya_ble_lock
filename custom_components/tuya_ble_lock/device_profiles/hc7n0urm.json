@@ -9,9 +9,12 @@
     "lock": {
       "unlock_dp": 71,
       "preferred_control": "gateway",
-      "gateway_status_listener": true,
+      "gateway_lan_status_listener": true,
+      "gateway_lan_status_poll_seconds": 1,
+      "gateway_lan_status_timeout_seconds": 1,
+      "gateway_status_listener": false,
       "ble_advertisement_listener": true,
-      "openapi_status_sync": true,
+      "openapi_status_sync": false,
       "gateway_status_code_map": {
         "automatic_lock": 33,
         "lock_motor_state": 47,

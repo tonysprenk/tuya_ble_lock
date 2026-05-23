@@ -197,6 +197,29 @@ class TuyaLanProbeTest(unittest.TestCase):
 
         self.assertEqual(candidates, ("cdaf90aaa63d669e", "other", "bf68a8zsn0m8xzib"))
 
+    def test_extract_dps_from_lan_status_maps_requested_dps(self):
+        dps = self.module.extract_dps_from_lan_status(
+            {"dps": {"9": "low", "33": False, "47": True, "36": 10}},
+            (47, 33),
+        )
+
+        self.assertEqual(dps, [{"id": 47, "raw": b"\x01"}, {"id": 33, "raw": b"\x00"}])
+
+    def test_read_tinytuya_gateway_status_returns_subdevice_dps(self):
+        result = self.module.read_tinytuya_gateway_status(
+            FakeTinyTuya,
+            gateway_id="gw-1",
+            host="192.168.1.25",
+            local_key="key-1",
+            child_id="lock-1",
+            child_cids=("lock-1",),
+            status_dps=(47,),
+            version=3.4,
+            timeout=2.0,
+        )
+
+        self.assertEqual(result["dps"], [{"id": 47, "raw": b"\x01"}])
+
 
 if __name__ == "__main__":
     unittest.main()

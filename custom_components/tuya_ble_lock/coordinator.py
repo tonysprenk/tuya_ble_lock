@@ -35,6 +35,7 @@ DEFAULT_CHECK_CODE_SOURCE_DPS = (73, 71)
 # Keep command BLE sessions short so the Tuya app/gateway can reconnect quickly.
 IDLE_DISCONNECT_SECONDS = 10
 GATEWAY_STATUS_RETRY_SECONDS = 60
+GATEWAY_LAN_STATUS_RESOLVE_RETRY_SECONDS = 30
 
 
 def _safe_exception_message(exc: Exception) -> str:
@@ -71,6 +72,9 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self._listener_task: asyncio.Task | None = None
         self._gateway_status_listener = None
         self._gateway_status_retry_handle: asyncio.TimerHandle | None = None
+        self._gateway_lan_status_task: asyncio.Task | None = None
+        self._gateway_lan_status_config: dict[str, Any] | None = None
+        self._gateway_lan_status_failures = 0
         self._ble_advertisement_unsub = None
         self._last_ble_advertisement_signature: tuple | None = None
         self._last_ble_advertisement_log_at = 0.0
@@ -232,6 +236,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             opened_connection = False
             used_ble = False
             try:
+                if await self._async_refresh_status_from_gateway_lan():
+                    return self.state
                 if await self._async_refresh_status_from_cloud():
                     return self.state
                 opened_connection = not self._session_ready()
@@ -280,6 +286,23 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     def _gateway_status_listener_enabled(self) -> bool:
         return bool(self._lock_cfg().get("gateway_status_listener"))
+
+    def _gateway_lan_status_listener_enabled(self) -> bool:
+        return bool(self._lock_cfg().get("gateway_lan_status_listener"))
+
+    def _gateway_lan_status_poll_seconds(self) -> float:
+        value = self._lock_cfg().get("gateway_lan_status_poll_seconds", 1.0)
+        try:
+            return max(float(value), 0.5)
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _gateway_lan_status_timeout_seconds(self) -> float:
+        value = self._lock_cfg().get("gateway_lan_status_timeout_seconds", 1.0)
+        try:
+            return max(float(value), 0.25)
+        except (TypeError, ValueError):
+            return 1.0
 
     def _ble_advertisement_listener_enabled(self) -> bool:
         return bool(self._lock_cfg().get("ble_advertisement_listener"))
@@ -436,6 +459,210 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self._gateway_status_retry_handle = None
         if handle is not None:
             handle.cancel()
+
+    async def async_start_gateway_lan_status_listener(self) -> bool:
+        """Start fast local gateway status sync when enabled by the profile."""
+        if not self._gateway_lan_status_listener_enabled():
+            return False
+        if self._gateway_lan_status_task and not self._gateway_lan_status_task.done():
+            return True
+        self._gateway_lan_status_task = self.hass.async_create_task(
+            self._gateway_lan_status_loop()
+        )
+        _LOGGER.info("Tuya gateway LAN status listener started for %s", self._entry.title)
+        return True
+
+    async def async_stop_gateway_lan_status_listener(self) -> None:
+        """Stop the local gateway status loop if it is running."""
+        task = self._gateway_lan_status_task
+        self._gateway_lan_status_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _gateway_lan_status_loop(self) -> None:
+        poll_seconds = self._gateway_lan_status_poll_seconds()
+        try:
+            while True:
+                refreshed = await self._async_refresh_status_from_gateway_lan()
+                sleep_seconds = (
+                    poll_seconds
+                    if refreshed or self._gateway_lan_status_config
+                    else GATEWAY_LAN_STATUS_RESOLVE_RETRY_SECONDS
+                )
+                await asyncio.sleep(sleep_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _LOGGER.debug("Tuya gateway LAN status loop stopped for %s: %s", self._entry.title, exc)
+
+    async def _async_refresh_status_from_gateway_lan(self) -> bool:
+        if not self._gateway_lan_status_listener_enabled():
+            return False
+
+        source_dps = self._status_sync_dps()
+        if not source_dps:
+            return False
+
+        config = await self._async_get_gateway_lan_status_config()
+        if not config:
+            return False
+
+        try:
+            result = await self.hass.async_add_executor_job(
+                self._read_gateway_lan_status,
+                config,
+                source_dps,
+            )
+        except Exception as exc:
+            self._gateway_lan_status_failures += 1
+            if self._gateway_lan_status_failures >= 3:
+                self._gateway_lan_status_config = None
+            _LOGGER.debug(
+                "Tuya gateway LAN status refresh failed for %s: %s",
+                self._entry.title,
+                exc,
+            )
+            return False
+
+        reports = result.get("dps") if isinstance(result, dict) else None
+        if not reports:
+            return False
+
+        self._gateway_lan_status_failures = 0
+        self._process_dp_reports(reports)
+        _LOGGER.debug(
+            "Refreshed LAN gateway status for %s from cid=%s: %s",
+            self._entry.title,
+            result.get("cid"),
+            [(dp["id"], bytes(dp["raw"]).hex()) for dp in reports],
+        )
+        return True
+
+    async def _async_get_gateway_lan_status_config(self) -> dict[str, Any] | None:
+        if self._gateway_lan_status_config:
+            return self._gateway_lan_status_config
+
+        config = await self._async_resolve_gateway_lan_status_config()
+        if config:
+            self._gateway_lan_status_config = config
+        return config
+
+    async def _async_resolve_gateway_lan_status_config(self) -> dict[str, Any] | None:
+        credentials = self._cloud_credentials()
+        if not credentials:
+            _LOGGER.debug(
+                "Cannot resolve Tuya gateway LAN status for %s: cloud credentials are missing",
+                self._entry.title,
+            )
+            return None
+
+        device_id = self._device_id_from_virtual_id()
+        if not device_id:
+            _LOGGER.debug("Cannot resolve Tuya gateway LAN status for %s: device id is missing", self._entry.title)
+            return None
+
+        from .tuya_lan_probe import (
+            _async_fetch_mobile_inventory,
+            _is_private_ipv4_host,
+            async_get_private_ipv4_networks,
+            child_cid_candidates,
+            extract_lan_details,
+            scan_tuya_lan_ports,
+            select_gateway_candidate,
+        )
+
+        login, devices = await _async_fetch_mobile_inventory(self.hass, credentials)
+        if not login.get("success"):
+            _LOGGER.debug("Cannot resolve Tuya gateway LAN status for %s: Tuya login failed", self._entry.title)
+            return None
+
+        lock_device = next(
+            (device for device in devices if extract_lan_details(device)["device_id"] == device_id),
+            None,
+        )
+        lock_cfg = self._lock_cfg()
+        gateway_device = select_gateway_candidate(
+            device_id,
+            devices,
+            explicit_gateway_id=lock_cfg.get("gateway_device_id"),
+        )
+        lock_details = extract_lan_details(lock_device)
+        gateway_details = extract_lan_details(gateway_device)
+
+        gateway_id = str(lock_cfg.get("gateway_device_id") or gateway_details["device_id"] or "").strip()
+        local_key = str(
+            lock_cfg.get("gateway_local_key")
+            or gateway_details["local_key"]
+            or lock_details["local_key"]
+            or ""
+        ).strip()
+        host = str(lock_cfg.get("gateway_lan_host") or gateway_details["host"] or "").strip()
+        if host and not _is_private_ipv4_host(host):
+            _LOGGER.debug("Ignoring non-LAN Tuya gateway host for %s: %s", self._entry.title, host)
+            host = ""
+
+        if not host:
+            networks = await async_get_private_ipv4_networks(self.hass)
+            discovery = await self.hass.async_add_executor_job(scan_tuya_lan_ports, networks)
+            candidates = discovery.get("candidates") if isinstance(discovery, dict) else None
+            if candidates:
+                host = candidates[0]["host"]
+
+        child_cids = child_cid_candidates(
+            device_id,
+            explicit_child_cid=str(lock_cfg.get("gateway_child_cid") or ""),
+            device_uuid=str(self._entry.data.get("device_uuid", "")),
+            node_id=lock_details["node_id"],
+        )
+
+        if not gateway_id or not host or not local_key:
+            _LOGGER.debug(
+                "Cannot resolve Tuya gateway LAN status for %s: gateway_id=%s host=%s local_key_present=%s",
+                self._entry.title,
+                bool(gateway_id),
+                host or "<missing>",
+                bool(local_key),
+            )
+            return None
+
+        _LOGGER.info(
+            "Resolved Tuya gateway LAN status for %s: gateway=%s host=%s child_cids=%s",
+            self._entry.title,
+            gateway_id,
+            host,
+            list(child_cids),
+        )
+        return {
+            "gateway_id": gateway_id,
+            "host": host,
+            "local_key": local_key,
+            "child_id": device_id,
+            "child_cids": child_cids,
+            "version": float(lock_cfg.get("gateway_lan_protocol_version", 3.4)),
+            "timeout": self._gateway_lan_status_timeout_seconds(),
+        }
+
+    def _read_gateway_lan_status(self, config: dict[str, Any], source_dps: tuple[int, ...]) -> dict[str, Any]:
+        import tinytuya
+
+        from .tuya_lan_probe import read_tinytuya_gateway_status
+
+        return read_tinytuya_gateway_status(
+            tinytuya,
+            gateway_id=config["gateway_id"],
+            host=config["host"],
+            local_key=config["local_key"],
+            child_id=config["child_id"],
+            child_cids=tuple(config.get("child_cids") or ()),
+            status_dps=source_dps,
+            version=float(config.get("version", 3.4)),
+            timeout=float(config.get("timeout", 1.0)),
+        )
 
     def _status_sync_dps(self) -> tuple[int, ...]:
         value = self._profile.get("status_sync_dps", ())
