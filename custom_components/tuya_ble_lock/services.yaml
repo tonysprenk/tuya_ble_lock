@@ -208,3 +208,16 @@ probe_gateway_lan:
           max: 15
           step: 1
           mode: box
+
+probe_openapi_status:
+  name: Probe OpenAPI status
+  description: >
+    Run read-only diagnostics against Tuya OpenAPI and return the current raw
+    status list plus any mapped lock DPs. This does not lock or unlock the door.
+  fields:
+    device_id:
+      name: Lock device
+      required: true
+      selector:
+        device:
+          integration: tuya_ble_lock

@@ -16,6 +16,9 @@ from .const import (
     CRED_CARD,
     STAGE_NAMES,
     CONF_DEVICE_UUID,
+    CONF_TUYA_ACCESS_ID,
+    CONF_TUYA_ACCESS_SECRET,
+    CONF_TUYA_REGION,
 )
 from .credential_store import CredentialStore
 from .ble_commands import (
@@ -80,6 +83,10 @@ PROBE_GATEWAY_LAN_SCHEMA = vol.Schema({
     vol.Optional("host"): str,
     vol.Optional("child_cid"): str,
     vol.Optional("timeout", default=4.0): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=15.0)),
+})
+
+PROBE_OPENAPI_STATUS_SCHEMA = vol.Schema({
+    vol.Required("device_id"): str,
 })
 
 
@@ -428,6 +435,42 @@ async def async_register_services(hass: HomeAssistant) -> None:
             timeout=call.data["timeout"],
         )
 
+    async def handle_probe_openapi_status(call: ServiceCall):
+        device_id = call.data["device_id"]
+        _entry, data = _get_entry_and_data(hass, device_id)
+        coordinator = data.coordinator
+        credentials = coordinator._cloud_credentials()
+        if not credentials:
+            raise HomeAssistantError("Tuya cloud credentials are missing for this lock")
+        access_id = credentials.get(CONF_TUYA_ACCESS_ID)
+        access_secret = credentials.get(CONF_TUYA_ACCESS_SECRET)
+        if not access_id or not access_secret:
+            raise HomeAssistantError("Tuya OpenAPI access ID/secret are missing for this lock")
+        lock_device_id = coordinator._device_id_from_virtual_id()
+        if not lock_device_id:
+            raise HomeAssistantError("Tuya device ID is missing for this lock")
+
+        from .tuya_cloud import async_fetch_openapi_status_bundle
+
+        status_bundle = await async_fetch_openapi_status_bundle(
+            hass,
+            region=credentials[CONF_TUYA_REGION],
+            access_id=access_id,
+            access_secret=access_secret,
+            device_id=lock_device_id,
+            status_code_map=coordinator._gateway_status_code_map(),
+            source_dps=coordinator._status_sync_dps(),
+        )
+        return {
+            "device_id": lock_device_id,
+            "status_summary": status_bundle.get("status_summary"),
+            "status_response": status_bundle.get("status_response"),
+            "mapped_dps": {
+                dp_id: raw.hex()
+                for dp_id, raw in sorted(status_bundle.get("raw_dps", {}).items())
+            },
+        }
+
     hass.services.async_register(DOMAIN, "add_pin", handle_add_pin, schema=ADD_PIN_SCHEMA)
     hass.services.async_register(DOMAIN, "add_fingerprint", handle_add_fingerprint, schema=ADD_FINGERPRINT_SCHEMA)
     hass.services.async_register(DOMAIN, "add_card", handle_add_card, schema=ADD_CARD_SCHEMA)
@@ -435,3 +478,4 @@ async def async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "list_credentials", handle_list_credentials, schema=LIST_CREDENTIALS_SCHEMA, supports_response=SupportsResponse.OPTIONAL)
     hass.services.async_register(DOMAIN, "create_temp_password", handle_create_temp_password, schema=CREATE_TEMP_PASSWORD_SCHEMA)
     hass.services.async_register(DOMAIN, "probe_gateway_lan", handle_probe_gateway_lan, schema=PROBE_GATEWAY_LAN_SCHEMA, supports_response=SupportsResponse.OPTIONAL)
+    hass.services.async_register(DOMAIN, "probe_openapi_status", handle_probe_openapi_status, schema=PROBE_OPENAPI_STATUS_SCHEMA, supports_response=SupportsResponse.OPTIONAL)
