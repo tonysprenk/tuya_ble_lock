@@ -125,7 +125,7 @@ class TuyaLanProbeTest(unittest.TestCase):
             host="192.168.1.25",
             local_key="key-1",
             child_id="lock-1",
-            child_cid="lock-1",
+            child_cids=("lock-1",),
             status_dps=(47, 33),
             versions=(3.4,),
             timeout=2.0,
@@ -140,6 +140,62 @@ class TuyaLanProbeTest(unittest.TestCase):
         self.assertIn(("status",), child.calls)
         self.assertIn(("updatedps", (47, 33)), child.calls)
         self.assertNotIn(("set_multiple_values",), gateway.calls + child.calls)
+
+    def test_adapter_network_discovery_keeps_only_enabled_private_lans(self):
+        adapters = [
+            {
+                "name": "end0",
+                "enabled": True,
+                "ipv4": [{"address": "192.168.2.16", "network_prefix": 24}],
+            },
+            {
+                "name": "hassio",
+                "enabled": False,
+                "ipv4": [{"address": "172.30.32.1", "network_prefix": 23}],
+            },
+            {
+                "name": "wan",
+                "enabled": True,
+                "ipv4": [{"address": "86.89.194.195", "network_prefix": 24}],
+            },
+        ]
+
+        networks = self.module.private_ipv4_networks_from_adapters(adapters)
+
+        self.assertEqual(networks, ("192.168.2.0/24",))
+
+    def test_lan_scan_checks_private_hosts_and_reports_open_tuya_ports(self):
+        checked = []
+
+        def fake_probe(host, port, timeout):
+            checked.append((host, port, timeout))
+            return host == "192.168.2.2" and port == 6668
+
+        result = self.module.scan_tuya_lan_ports(
+            ("192.168.2.0/30", "86.89.194.0/30"),
+            ports=(6668, 6667),
+            timeout=0.1,
+            connect_checker=fake_probe,
+            max_workers=1,
+        )
+
+        self.assertEqual(result["networks"], ["192.168.2.0/30"])
+        self.assertEqual(result["hosts_scanned"], 2)
+        self.assertEqual(result["candidates"], [{"host": "192.168.2.2", "open_ports": [6668]}])
+        self.assertIn(("192.168.2.1", 6668, 0.1), checked)
+        self.assertNotIn(("86.89.194.1", 6668, 0.1), checked)
+
+    def test_child_cid_candidates_prefer_online_gateway_cid_then_uuid(self):
+        candidates = self.module.child_cid_candidates(
+            "bf68a8zsn0m8xzib",
+            device_uuid="cdaf90aaa63d669e",
+            subdevice_query={
+                "reqType": "subdev_online_stat_report",
+                "data": {"online": ["cdaf90aaa63d669e"], "nearby": ["other"]},
+            },
+        )
+
+        self.assertEqual(candidates, ("cdaf90aaa63d669e", "other", "bf68a8zsn0m8xzib"))
 
 
 if __name__ == "__main__":

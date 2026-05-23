@@ -15,6 +15,7 @@ from .const import (
     CRED_FINGERPRINT,
     CRED_CARD,
     STAGE_NAMES,
+    CONF_DEVICE_UUID,
 )
 from .credential_store import CredentialStore
 from .ble_commands import (
@@ -77,6 +78,7 @@ PROBE_GATEWAY_LAN_SCHEMA = vol.Schema({
     vol.Required("device_id"): str,
     vol.Optional("gateway_device_id"): str,
     vol.Optional("host"): str,
+    vol.Optional("child_cid"): str,
     vol.Optional("timeout", default=4.0): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=15.0)),
 })
 
@@ -418,6 +420,8 @@ async def async_register_services(hass: HomeAssistant) -> None:
             hass,
             credentials=credentials,
             lock_device_id=lock_device_id,
+            device_uuid=entry.data.get(CONF_DEVICE_UUID, ""),
+            child_cid=call.data.get("child_cid", ""),
             gateway_device_id=call.data.get("gateway_device_id"),
             host=call.data.get("host"),
             status_dps=coordinator._status_sync_dps(),

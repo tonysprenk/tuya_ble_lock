@@ -191,6 +191,12 @@ probe_gateway_lan:
       required: false
       selector:
         text:
+    child_cid:
+      name: Gateway child CID
+      description: Optional subdevice CID override. Leave empty to use the lock UUID.
+      required: false
+      selector:
+        text:
     timeout:
       name: Timeout
       description: Per-attempt timeout in seconds.

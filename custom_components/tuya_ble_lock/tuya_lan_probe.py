@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import ipaddress
 import socket
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -23,6 +25,9 @@ NODE_ID_KEYS = ("nodeId", "node_id", "cid", "meshId")
 GATEWAY_MARKERS = ("gateway", "网关", "bluetooth", "ble", "lan ya")
 LAN_PORTS = (6668, 6667, 6666)
 LAN_PROTOCOL_VERSIONS = (3.4, 3.5, 3.3)
+LAN_SCAN_TIMEOUT = 0.25
+LAN_SCAN_WORKERS = 64
+LAN_SCAN_MAX_HOSTS_PER_NETWORK = 254
 
 
 def _first_string(device: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -133,6 +138,49 @@ def _call_result(func, *args) -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _append_unique_text(values: list[str], value: Any) -> None:
+    if value is None:
+        return
+    text = str(value).strip()
+    if text and text not in values:
+        values.append(text)
+
+
+def _subdevice_query_cids(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    data = value.get("data")
+    if not isinstance(data, dict):
+        return []
+
+    cids: list[str] = []
+    for key in ("online", "nearby", "offline"):
+        raw_values = data.get(key)
+        if isinstance(raw_values, list):
+            for raw_value in raw_values:
+                _append_unique_text(cids, raw_value)
+    return cids
+
+
+def child_cid_candidates(
+    lock_device_id: str,
+    *,
+    device_uuid: str = "",
+    node_id: str = "",
+    explicit_child_cid: str = "",
+    subdevice_query: Any = None,
+) -> tuple[str, ...]:
+    """Return likely gateway child CIDs for a Tuya BLE subdevice."""
+    candidates: list[str] = []
+    _append_unique_text(candidates, explicit_child_cid)
+    for cid in _subdevice_query_cids(subdevice_query):
+        _append_unique_text(candidates, cid)
+    _append_unique_text(candidates, device_uuid)
+    _append_unique_text(candidates, node_id)
+    _append_unique_text(candidates, lock_device_id)
+    return tuple(candidates)
+
+
 def probe_tcp_ports(host: str, ports: tuple[int, ...] = LAN_PORTS, timeout: float = 2.0) -> list[dict[str, Any]]:
     """Check whether common Tuya LAN TCP ports accept connections."""
     results = []
@@ -152,7 +200,7 @@ def probe_tinytuya_gateway(
     host: str,
     local_key: str,
     child_id: str,
-    child_cid: str,
+    child_cids: tuple[str, ...],
     status_dps: tuple[int, ...],
     versions: tuple[float, ...] = LAN_PROTOCOL_VERSIONS,
     timeout: float = 4.0,
@@ -179,10 +227,31 @@ def probe_tinytuya_gateway(
             attempt["gateway_status"] = _call_result(gateway.status)
             attempt["subdevice_query"] = _call_result(gateway.subdev_query)
 
-            child = tinytuya_module.Device(child_id, cid=child_cid or child_id, parent=gateway)
-            attempt["subdevice_status"] = _call_result(child.status)
-            if status_dps:
-                attempt["subdevice_updatedps"] = _call_result(child.updatedps, list(status_dps))
+            queried_cids = child_cid_candidates(
+                child_id,
+                explicit_child_cid=child_cids[0] if child_cids else "",
+                subdevice_query=(
+                    attempt["subdevice_query"].get("value")
+                    if attempt["subdevice_query"].get("ok")
+                    else None
+                ),
+            )
+            all_cids = tuple(dict.fromkeys((*queried_cids, *child_cids, child_id)))
+            subdevices = []
+            for cid in all_cids:
+                child = tinytuya_module.Device(child_id, cid=cid, parent=gateway)
+                child_result = {
+                    "cid": cid,
+                    "status": _call_result(child.status),
+                }
+                if status_dps:
+                    child_result["updatedps"] = _call_result(child.updatedps, list(status_dps))
+                subdevices.append(child_result)
+            attempt["subdevices"] = subdevices
+            if subdevices:
+                attempt["subdevice_status"] = subdevices[0]["status"]
+                if status_dps:
+                    attempt["subdevice_updatedps"] = subdevices[0]["updatedps"]
         except Exception as exc:
             attempt["setup_error"] = f"{type(exc).__name__}: {exc}"
         finally:
@@ -193,6 +262,170 @@ def probe_tinytuya_gateway(
                     pass
         attempts.append(attempt)
     return {"attempts": attempts}
+
+
+def _is_private_ipv4_host(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (
+        ip.version == 4
+        and ip.is_private
+        and not ip.is_loopback
+        and not ip.is_link_local
+        and not ip.is_multicast
+        and not ip.is_unspecified
+    )
+
+
+def _network_from_ipv4(address: str, prefix: Any) -> str | None:
+    if not address:
+        return None
+    try:
+        if "/" in address and prefix in (None, ""):
+            interface = ipaddress.ip_interface(address)
+        else:
+            interface = ipaddress.ip_interface(f"{address}/{prefix}")
+    except (TypeError, ValueError):
+        return None
+
+    ip = interface.ip
+    if not _is_private_ipv4_host(str(ip)):
+        return None
+
+    network = interface.network
+    if network.prefixlen < 24:
+        network = ipaddress.ip_network(f"{ip}/24", strict=False)
+    return str(network)
+
+
+def private_ipv4_networks_from_adapters(adapters: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Extract bounded private IPv4 networks from HA network adapter metadata."""
+    networks: list[str] = []
+    seen: set[str] = set()
+    for adapter in adapters:
+        if adapter.get("enabled") is False:
+            continue
+        name = str(adapter.get("name", "")).lower()
+        if name.startswith(("lo", "docker", "veth", "br-")) or name in {"hassio"}:
+            continue
+        for ipv4 in adapter.get("ipv4") or ():
+            if not isinstance(ipv4, dict):
+                continue
+            prefix = ipv4.get("network_prefix", ipv4.get("prefix"))
+            network = _network_from_ipv4(str(ipv4.get("address", "")), prefix)
+            if network and network not in seen:
+                seen.add(network)
+                networks.append(network)
+    return tuple(networks)
+
+
+def _psutil_adapters() -> list[dict[str, Any]]:
+    try:
+        import psutil
+    except ImportError:
+        return []
+
+    adapters = []
+    for name, addrs in psutil.net_if_addrs().items():
+        ipv4 = []
+        for addr in addrs:
+            if addr.family != socket.AF_INET:
+                continue
+            prefix = None
+            if addr.netmask:
+                try:
+                    prefix = ipaddress.ip_network(f"0.0.0.0/{addr.netmask}").prefixlen
+                except ValueError:
+                    prefix = None
+            ipv4.append({"address": addr.address, "network_prefix": prefix or 24})
+        adapters.append({"name": name, "enabled": True, "ipv4": ipv4})
+    return adapters
+
+
+async def async_get_private_ipv4_networks(hass) -> tuple[str, ...]:
+    """Return private LAN networks HA can use for local discovery."""
+    try:
+        from homeassistant.components import network
+
+        adapters = await network.async_get_adapters(hass)
+    except Exception:
+        adapters = _psutil_adapters()
+    return private_ipv4_networks_from_adapters(adapters)
+
+
+def _tcp_port_open(host: str, port: int, timeout: float) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _scan_hosts_for_network(network: ipaddress.IPv4Network, max_hosts: int) -> list[str]:
+    hosts = []
+    for host in network.hosts():
+        hosts.append(str(host))
+        if len(hosts) >= max_hosts:
+            break
+    return hosts
+
+
+def scan_tuya_lan_ports(
+    networks: tuple[str, ...],
+    *,
+    ports: tuple[int, ...] = LAN_PORTS,
+    timeout: float = LAN_SCAN_TIMEOUT,
+    connect_checker: Callable[[str, int, float], bool] = _tcp_port_open,
+    max_workers: int = LAN_SCAN_WORKERS,
+    max_hosts_per_network: int = LAN_SCAN_MAX_HOSTS_PER_NETWORK,
+) -> dict[str, Any]:
+    """Scan bounded private LAN ranges for hosts with common Tuya LAN ports open."""
+    parsed_networks: list[ipaddress.IPv4Network] = []
+    for network_text in networks:
+        try:
+            network = ipaddress.ip_network(network_text, strict=False)
+        except ValueError:
+            continue
+        if network.version != 4 or not network.is_private:
+            continue
+        parsed_networks.append(network)
+
+    hosts: list[str] = []
+    for network in parsed_networks:
+        hosts.extend(_scan_hosts_for_network(network, max_hosts_per_network))
+
+    open_by_host: dict[str, list[int]] = {}
+    max_workers = max(1, min(max_workers, max(len(hosts) * len(ports), 1)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(connect_checker, host, port, timeout): (host, port)
+            for host in hosts
+            for port in ports
+        }
+        for future in as_completed(futures):
+            host, port = futures[future]
+            try:
+                is_open = future.result()
+            except Exception:
+                is_open = False
+            if is_open:
+                open_by_host.setdefault(host, []).append(port)
+
+    candidates = [
+        {"host": host, "open_ports": sorted(open_ports)}
+        for host, open_ports in sorted(
+            open_by_host.items(),
+            key=lambda item: ipaddress.ip_address(item[0]),
+        )
+    ]
+    return {
+        "networks": [str(network) for network in parsed_networks],
+        "ports": list(ports),
+        "hosts_scanned": len(hosts),
+        "candidates": candidates,
+    }
 
 
 async def _async_fetch_mobile_inventory(
@@ -242,6 +475,8 @@ async def async_probe_gateway_lan(
     *,
     credentials: dict[str, Any],
     lock_device_id: str,
+    device_uuid: str = "",
+    child_cid: str = "",
     gateway_device_id: str | None = None,
     host: str | None = None,
     status_dps: tuple[int, ...] = (),
@@ -276,13 +511,35 @@ async def async_probe_gateway_lan(
     gateway_host = host or gateway_details["host"]
     local_key = gateway_details["local_key"] or lock_details["local_key"]
     gateway_id = gateway_details["device_id"] or gateway_device_id or ""
-    child_cid = lock_details["node_id"] or lock_device_id
+    child_cids = child_cid_candidates(
+        lock_device_id,
+        explicit_child_cid=child_cid,
+        device_uuid=device_uuid,
+        node_id=lock_details["node_id"],
+    )
+
+    metadata_host = gateway_host
+    if not host and gateway_host and not _is_private_ipv4_host(gateway_host):
+        result["cloud_host_skipped"] = gateway_host
+        gateway_host = ""
+
+    if not host and not gateway_host:
+        networks = await async_get_private_ipv4_networks(hass)
+        result["lan_networks"] = list(networks)
+        discovery = await hass.async_add_executor_job(
+            scan_tuya_lan_ports,
+            networks,
+        )
+        result["lan_discovery"] = discovery
+        if discovery["candidates"]:
+            gateway_host = discovery["candidates"][0]["host"]
 
     result["probe_input"] = {
         "gateway_id": gateway_id,
         "host": gateway_host,
+        "metadata_host": metadata_host,
         "child_id": lock_device_id,
-        "child_cid": child_cid,
+        "child_cids": list(child_cids),
         "local_key_present": bool(local_key),
         "status_dps": list(status_dps),
     }
@@ -308,7 +565,7 @@ async def async_probe_gateway_lan(
             host=gateway_host,
             local_key=local_key,
             child_id=lock_device_id,
-            child_cid=child_cid,
+            child_cids=child_cids,
             status_dps=status_dps,
             timeout=timeout,
         )
