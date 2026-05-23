@@ -36,6 +36,7 @@ DEFAULT_CHECK_CODE_SOURCE_DPS = (73, 71)
 IDLE_DISCONNECT_SECONDS = 10
 GATEWAY_STATUS_RETRY_SECONDS = 60
 GATEWAY_LAN_STATUS_RESOLVE_RETRY_SECONDS = 30
+GATEWAY_LAN_STATUS_FALLBACK_START_DELAY_SECONDS = 60
 
 
 def _safe_exception_message(exc: Exception) -> str:
@@ -73,6 +74,8 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self._gateway_status_listener = None
         self._gateway_status_retry_handle: asyncio.TimerHandle | None = None
         self._gateway_lan_status_task: asyncio.Task | None = None
+        self._gateway_lan_status_start_handle: asyncio.TimerHandle | None = None
+        self._gateway_lan_status_start_unsub = None
         self._gateway_lan_status_config: dict[str, Any] | None = None
         self._gateway_lan_status_failures = 0
         self._ble_advertisement_unsub = None
@@ -466,14 +469,12 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             return False
         if self._gateway_lan_status_task and not self._gateway_lan_status_task.done():
             return True
-        self._gateway_lan_status_task = self.hass.async_create_task(
-            self._gateway_lan_status_loop()
-        )
-        _LOGGER.info("Tuya gateway LAN status listener started for %s", self._entry.title)
+        self._schedule_gateway_lan_status_start()
         return True
 
     async def async_stop_gateway_lan_status_listener(self) -> None:
         """Stop the local gateway status loop if it is running."""
+        self._cancel_gateway_lan_status_start()
         task = self._gateway_lan_status_task
         self._gateway_lan_status_task = None
         if task is None:
@@ -483,6 +484,57 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             await task
         except asyncio.CancelledError:
             pass
+
+    def _schedule_gateway_lan_status_start(self) -> None:
+        """Start the long-running LAN loop after HA startup has completed."""
+        if self._gateway_lan_status_start_handle is not None or self._gateway_lan_status_start_unsub is not None:
+            return
+
+        if bool(getattr(self.hass, "is_running", False)):
+            self._start_gateway_lan_status_task()
+            return
+
+        try:
+            from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+
+            self._gateway_lan_status_start_unsub = self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED,
+                self._handle_gateway_lan_status_start_event,
+            )
+            _LOGGER.debug("Tuya gateway LAN status listener for %s queued until HA is started", self._entry.title)
+        except Exception:
+            self._gateway_lan_status_start_handle = self.hass.loop.call_later(
+                GATEWAY_LAN_STATUS_FALLBACK_START_DELAY_SECONDS,
+                self._start_gateway_lan_status_task,
+            )
+            _LOGGER.debug(
+                "Tuya gateway LAN status listener for %s queued with fallback delay",
+                self._entry.title,
+            )
+
+    @callback
+    def _handle_gateway_lan_status_start_event(self, _event) -> None:
+        self._gateway_lan_status_start_unsub = None
+        self._start_gateway_lan_status_task()
+
+    def _start_gateway_lan_status_task(self) -> None:
+        self._gateway_lan_status_start_handle = None
+        if self._gateway_lan_status_task and not self._gateway_lan_status_task.done():
+            return
+        self._gateway_lan_status_task = self.hass.async_create_task(
+            self._gateway_lan_status_loop()
+        )
+        _LOGGER.info("Tuya gateway LAN status listener started for %s", self._entry.title)
+
+    def _cancel_gateway_lan_status_start(self) -> None:
+        handle = self._gateway_lan_status_start_handle
+        self._gateway_lan_status_start_handle = None
+        if handle is not None:
+            handle.cancel()
+        unsub = self._gateway_lan_status_start_unsub
+        self._gateway_lan_status_start_unsub = None
+        if unsub is not None:
+            unsub()
 
     async def _gateway_lan_status_loop(self) -> None:
         poll_seconds = self._gateway_lan_status_poll_seconds()
@@ -500,6 +552,19 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         except Exception as exc:
             _LOGGER.debug("Tuya gateway LAN status loop stopped for %s: %s", self._entry.title, exc)
 
+    def _gateway_lan_status_read_timeout_seconds(self, config: dict[str, Any]) -> float:
+        value = self._lock_cfg().get("gateway_lan_status_read_timeout_seconds")
+        if value is not None:
+            try:
+                return max(float(value), 0.1)
+            except (TypeError, ValueError):
+                pass
+        try:
+            transport_timeout = float(config.get("timeout", 1.0))
+        except (TypeError, ValueError):
+            transport_timeout = 1.0
+        return max(transport_timeout + 1.0, 2.0)
+
     async def _async_refresh_status_from_gateway_lan(self) -> bool:
         if not self._gateway_lan_status_listener_enabled():
             return False
@@ -513,10 +578,13 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             return False
 
         try:
-            result = await self.hass.async_add_executor_job(
-                self._read_gateway_lan_status,
-                config,
-                source_dps,
+            result = await asyncio.wait_for(
+                self.hass.async_add_executor_job(
+                    self._read_gateway_lan_status,
+                    config,
+                    source_dps,
+                ),
+                timeout=self._gateway_lan_status_read_timeout_seconds(config),
             )
         except Exception as exc:
             self._gateway_lan_status_failures += 1

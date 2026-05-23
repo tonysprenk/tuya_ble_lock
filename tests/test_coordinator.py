@@ -59,6 +59,11 @@ class FakeHass:
         return target(*args)
 
 
+class SlowExecutorHass(FakeHass):
+    async def async_add_executor_job(self, target, *args):
+        await asyncio.sleep(3600)
+
+
 def install_coordinator_stubs() -> None:
     custom_components = sys.modules.get("custom_components") or types.ModuleType("custom_components")
     tuya_ble_lock = sys.modules.get("custom_components.tuya_ble_lock") or types.ModuleType(
@@ -239,6 +244,52 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
             self.assertTrue(coordinator.state["motor_state"])
             self.assertFalse(session.is_connected)
+
+        asyncio.run(scenario())
+
+    def test_gateway_lan_status_start_is_deferred_while_hass_is_starting(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["entities"]["lock"]["gateway_lan_status_listener"] = True
+
+            started = await coordinator.async_start_gateway_lan_status_listener()
+            handle = coordinator._gateway_lan_status_start_handle
+
+            self.assertTrue(started)
+            self.assertIsNotNone(handle)
+            self.assertIsNone(coordinator._gateway_lan_status_task)
+
+            await coordinator.async_stop_gateway_lan_status_listener()
+
+            self.assertTrue(handle.cancelled())
+
+        asyncio.run(scenario())
+
+    def test_gateway_lan_status_refresh_times_out_executor_read(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator.hass = SlowExecutorHass()
+            coordinator._profile["status_sync_dps"] = [47]
+            coordinator._profile["entities"]["lock"].update(
+                {
+                    "gateway_lan_status_listener": True,
+                    "gateway_lan_status_read_timeout_seconds": 0.01,
+                }
+            )
+            coordinator._gateway_lan_status_config = {
+                "gateway_id": "gw-1",
+                "host": "192.168.1.25",
+                "local_key": "key-1",
+                "child_id": "ty-device",
+                "child_cids": ("lock-uuid",),
+                "version": 3.4,
+                "timeout": 1.0,
+            }
+
+            refreshed = await coordinator._async_refresh_status_from_gateway_lan()
+
+            self.assertFalse(refreshed)
+            self.assertEqual(coordinator._gateway_lan_status_failures, 1)
 
         asyncio.run(scenario())
 

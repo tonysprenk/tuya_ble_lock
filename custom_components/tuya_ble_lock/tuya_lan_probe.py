@@ -236,7 +236,7 @@ def read_tinytuya_gateway_status(
     if hasattr(gateway, "set_socketRetryLimit"):
         gateway.set_socketRetryLimit(1)
     if hasattr(gateway, "set_socketPersistent"):
-        gateway.set_socketPersistent(True)
+        gateway.set_socketPersistent(False)
 
     try:
         subdevice_query = gateway.subdev_query()
