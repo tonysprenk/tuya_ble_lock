@@ -287,6 +287,64 @@ class TuyaCloudTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_openapi_password_free_door_operate_uses_ticket_flow(self):
+        async def scenario():
+            class FakeResponse:
+                def __init__(self, payload):
+                    self.payload = payload
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+                def raise_for_status(self):
+                    return None
+
+                async def json(self, *, content_type=None):
+                    return self.payload
+
+            class FakeSession:
+                def __init__(self):
+                    self.calls = []
+                    self.responses = [
+                        {"success": True, "result": {"access_token": "token", "uid": "uid-1"}},
+                        {"success": True, "result": {"ticket_id": "ticket-1"}},
+                        {"success": True, "result": True},
+                    ]
+
+                def request(self, method, url, **kwargs):
+                    self.calls.append((method, url, kwargs))
+                    return FakeResponse(self.responses.pop(0))
+
+            session = FakeSession()
+            client = self.tuya_cloud.TuyaOpenAPIAsync(
+                session,
+                region="eu",
+                access_id="access-id",
+                access_secret="access-secret",
+            )
+
+            result = await client.async_operate_door_password_free("device-1", open_door=True)
+
+            self.assertTrue(result["success"])
+            self.assertEqual(session.calls[1][0], "POST")
+            self.assertEqual(
+                session.calls[1][1],
+                "https://openapi.tuyaeu.com/v1.0/smart-lock/devices/device-1/password-ticket",
+            )
+            self.assertEqual(session.calls[2][0], "POST")
+            self.assertEqual(
+                session.calls[2][1],
+                "https://openapi.tuyaeu.com/v1.0/smart-lock/devices/device-1/password-free/door-operate",
+            )
+            self.assertEqual(session.calls[2][2]["data"], '{"ticket_id":"ticket-1","open":true}')
+
+        import asyncio
+
+        asyncio.run(scenario())
+
     def test_openapi_token_cache_reused_between_clients(self):
         async def scenario():
             class FakeResponse:

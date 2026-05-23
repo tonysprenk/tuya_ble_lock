@@ -24,7 +24,11 @@ from .const import (
     CONF_TUYA_ACCESS_SECRET,
 )
 from .device_profiles import parse_dp_value
-from .tuya_cloud import async_fetch_cloud_lock_bundle, async_fetch_openapi_status_bundle
+from .tuya_cloud import (
+    async_fetch_cloud_lock_bundle,
+    async_fetch_openapi_status_bundle,
+    async_operate_openapi_door,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -289,6 +293,13 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     def _gateway_control_preferred(self) -> bool:
         return self._lock_cfg().get("preferred_control") == "gateway"
+
+    def _gateway_control_verify_seconds(self) -> float:
+        value = self._lock_cfg().get("gateway_control_verify_seconds", 8)
+        try:
+            return max(float(value), 0.0)
+        except (TypeError, ValueError):
+            return 8.0
 
     def _gateway_status_listener_enabled(self) -> bool:
         return bool(self._lock_cfg().get("gateway_status_listener"))
@@ -1131,9 +1142,42 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("Cannot send Tuya gateway lock command for %s: device id is missing", self._entry.title)
             return False
 
+        action_name = "unlock" if action_unlock else "lock"
+        access_id = credentials.get(CONF_TUYA_ACCESS_ID)
+        access_secret = credentials.get(CONF_TUYA_ACCESS_SECRET)
+        if access_id and access_secret:
+            try:
+                result = await async_operate_openapi_door(
+                    self.hass,
+                    region=credentials[CONF_TUYA_REGION],
+                    access_id=access_id,
+                    access_secret=access_secret,
+                    device_id=device_id,
+                    open_door=action_unlock,
+                )
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Tuya OpenAPI %s command failed for %s: %s",
+                    action_name,
+                    self._entry.title,
+                    _safe_exception_message(exc),
+                )
+                return False
+
+            if not result.get("success"):
+                _LOGGER.warning("Tuya OpenAPI %s command rejected for %s: %s", action_name, self._entry.title, result)
+                return False
+            if await self._async_wait_for_gateway_command_state(action_unlock=action_unlock):
+                return True
+            _LOGGER.warning(
+                "Tuya OpenAPI accepted %s command for %s but target state was not observed",
+                action_name,
+                self._entry.title,
+            )
+            return False
+
         unlock_dp = self._get_unlock_dp()
         payload = self._build_unlock_payload(action_unlock=action_unlock)
-        action_name = "unlock" if action_unlock else "lock"
         try:
             from .tuya_cloud import async_publish_cloud_lock_dp
 
@@ -1163,6 +1207,34 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         self.state["lock_state"] = not action_unlock
         self.async_set_updated_data(self.state)
         return True
+
+    async def _async_wait_for_gateway_command_state(self, *, action_unlock: bool) -> bool:
+        """Wait briefly until cloud status reflects a gateway command."""
+        deadline = time.monotonic() + self._gateway_control_verify_seconds()
+        while True:
+            await self._async_refresh_status_from_openapi(self._status_sync_dps())
+            matched = self._command_target_matches_state(action_unlock=action_unlock)
+            if matched is True:
+                self.async_set_updated_data(self.state)
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(1)
+
+    def _command_target_matches_state(self, *, action_unlock: bool) -> bool | None:
+        lock_state = self.state.get("lock_state")
+        if lock_state is not None:
+            return bool(lock_state) is (not action_unlock)
+
+        motor_state = self.state.get("motor_state")
+        if motor_state is not None and self._lock_cfg().get("motor_state_true_is_unlocked"):
+            return bool(motor_state) is action_unlock
+
+        auto_lock = self.state.get("auto_lock")
+        if auto_lock is not None and self._lock_cfg().get("auto_lock_reflects_lock_state", True):
+            return bool(auto_lock) is (not action_unlock)
+
+        return None
 
     def _get_payload_version(self) -> int:
         value = self._lock_cfg().get("payload_version", 1)

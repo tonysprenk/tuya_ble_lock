@@ -93,8 +93,12 @@ def install_coordinator_stubs() -> None:
     async def async_fetch_openapi_status_bundle(*args, **kwargs):
         raise AssertionError("test should not call the Tuya OpenAPI")
 
+    async def async_operate_openapi_door(*args, **kwargs):
+        raise AssertionError("test should not operate the Tuya lock")
+
     tuya_cloud.async_fetch_cloud_lock_bundle = async_fetch_cloud_lock_bundle
     tuya_cloud.async_fetch_openapi_status_bundle = async_fetch_openapi_status_bundle
+    tuya_cloud.async_operate_openapi_door = async_operate_openapi_door
 
     sys.modules.update(
         {
@@ -480,6 +484,121 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
                 [
                     ("gateway", True),
                     ("refresh", True),
+                    ("pair", None),
+                    ("ble", True, True),
+                ],
+            )
+
+        asyncio.run(scenario())
+
+    def test_gateway_control_uses_openapi_door_operate_and_verifies_status(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            module = self.coordinator_module
+            coordinator._entry.data.update(
+                {
+                    module.CONF_TUYA_EMAIL: "user@example.com",
+                    module.CONF_TUYA_PASSWORD: "secret",
+                    module.CONF_TUYA_COUNTRY: "31",
+                    module.CONF_TUYA_REGION: "eu",
+                    module.CONF_TUYA_ACCESS_ID: "access-id",
+                    module.CONF_TUYA_ACCESS_SECRET: "access-secret",
+                }
+            )
+            coordinator._profile["entities"]["lock"].update(
+                {
+                    "preferred_control": "gateway",
+                    "motor_state_true_is_unlocked": True,
+                }
+            )
+            events = []
+
+            async def operate_openapi_door(*args, **kwargs):
+                events.append(("operate", kwargs["open_door"]))
+                return {"success": True, "result": True}
+
+            async def refresh_status_from_openapi(source_dps):
+                events.append(("refresh", source_dps))
+                coordinator.state["motor_state"] = True
+                return True
+
+            old_operate = module.async_operate_openapi_door
+            module.async_operate_openapi_door = operate_openapi_door
+            coordinator._async_refresh_status_from_openapi = refresh_status_from_openapi
+            try:
+                sent = await coordinator._async_send_gateway_lock_action(action_unlock=True)
+            finally:
+                module.async_operate_openapi_door = old_operate
+
+            self.assertTrue(sent)
+            self.assertEqual(events, [("operate", True), ("refresh", ())])
+
+        asyncio.run(scenario())
+
+    def test_gateway_control_falls_back_when_openapi_status_does_not_reach_target(self):
+        async def scenario():
+            coordinator, session = self.make_coordinator()
+            module = self.coordinator_module
+            coordinator._entry.data.update(
+                {
+                    module.CONF_TUYA_EMAIL: "user@example.com",
+                    module.CONF_TUYA_PASSWORD: "secret",
+                    module.CONF_TUYA_COUNTRY: "31",
+                    module.CONF_TUYA_REGION: "eu",
+                    module.CONF_TUYA_ACCESS_ID: "access-id",
+                    module.CONF_TUYA_ACCESS_SECRET: "access-secret",
+                }
+            )
+            coordinator._profile["entities"]["lock"].update(
+                {
+                    "preferred_control": "gateway",
+                    "motor_state_true_is_unlocked": True,
+                    "gateway_control_verify_seconds": 0,
+                }
+            )
+            events = []
+
+            async def operate_openapi_door(*args, **kwargs):
+                events.append(("operate", kwargs["open_door"]))
+                return {"success": True, "result": True}
+
+            async def refresh_status_from_openapi(source_dps):
+                events.append(("refresh", source_dps))
+                coordinator.state["motor_state"] = False
+                return True
+
+            async def refresh_check_code_from_cloud(*, force=False):
+                events.append(("cloud", force))
+
+            async def ensure_connected():
+                events.append(("connect", None))
+                session.is_connected = True
+
+            async def pair_central_from_cloud():
+                events.append(("pair", None))
+
+            async def send_lock_action(*, action_unlock, allow_retry):
+                events.append(("ble", action_unlock, allow_retry))
+
+            old_operate = module.async_operate_openapi_door
+            module.async_operate_openapi_door = operate_openapi_door
+            coordinator._async_refresh_status_from_openapi = refresh_status_from_openapi
+            coordinator._async_refresh_check_code_from_cloud = refresh_check_code_from_cloud
+            coordinator._async_ensure_connected = ensure_connected
+            coordinator._async_pair_central_from_cloud = pair_central_from_cloud
+            coordinator._async_send_lock_action = send_lock_action
+            try:
+                await coordinator.async_unlock()
+            finally:
+                module.async_operate_openapi_door = old_operate
+
+            self.assertEqual(
+                events,
+                [
+                    ("operate", True),
+                    ("refresh", ()),
+                    ("cloud", False),
+                    ("connect", None),
                     ("pair", None),
                     ("ble", True, True),
                 ],

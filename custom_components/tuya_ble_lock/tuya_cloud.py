@@ -446,6 +446,28 @@ class TuyaOpenAPIAsync:
         """Get the latest Tuya OpenAPI status list for one device."""
         return await self._request("GET", f"/v1.0/iot-03/devices/{device_id}/status")
 
+    async def async_get_door_password_ticket(self, device_id: str) -> dict[str, Any]:
+        """Get a temporary ticket for password-free smart-lock operations."""
+        return await self._request("POST", f"/v1.0/smart-lock/devices/{device_id}/password-ticket")
+
+    async def async_operate_door_password_free(
+        self,
+        device_id: str,
+        *,
+        open_door: bool,
+    ) -> dict[str, Any]:
+        """Lock or unlock a smart lock using Tuya's ticket-based OpenAPI."""
+        ticket_resp = await self.async_get_door_password_ticket(device_id)
+        ticket_id = (ticket_resp.get("result") or {}).get("ticket_id")
+        if not ticket_resp.get("success") or not ticket_id:
+            return ticket_resp
+
+        return await self._request(
+            "POST",
+            f"/v1.0/smart-lock/devices/{device_id}/password-free/door-operate",
+            body={"ticket_id": ticket_id, "open": bool(open_door)},
+        )
+
 
 def _openapi_sign_url(path: str, params: dict[str, str]) -> str:
     if not params:
@@ -646,6 +668,26 @@ async def async_publish_cloud_lock_dp(
         {str(dp_id): base64.b64encode(payload).decode()},
         gid=device_info.get("gid"),
     )
+
+
+async def async_operate_openapi_door(
+    hass: HomeAssistant,
+    *,
+    region: str,
+    access_id: str,
+    access_secret: str,
+    device_id: str,
+    open_door: bool,
+) -> dict[str, Any]:
+    """Lock or unlock a smart lock through Tuya's official OpenAPI flow."""
+    session = async_get_clientsession(hass)
+    client = TuyaOpenAPIAsync(
+        session,
+        region=region,
+        access_id=access_id,
+        access_secret=access_secret,
+    )
+    return await client.async_operate_door_password_free(device_id, open_door=open_door)
 
 
 async def async_fetch_cloud_lock_bundle(
