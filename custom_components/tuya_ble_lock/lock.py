@@ -19,7 +19,7 @@ from .models import TuyaBLELockData
 
 _LOGGER = logging.getLogger(__name__)
 
-LOCK_COMMAND_TIMEOUT_SECONDS = 45
+LOCK_COMMAND_TIMEOUT_SECONDS = 20
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -134,13 +134,8 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         - auto_lock=False (passage ON) = lock is unlocked
         - auto_lock=True (passage OFF) = lock is locked
         """
-        if self._lock_cfg.get("motor_state_reflects_lock_state", True):
-            motor = self.coordinator.state.get("motor_state")
-            if self._lock_cfg.get("motor_state_true_is_unlocked"):
-                if motor is True and self._is_locked:
-                    self._is_locked = False
-            if motor is False and not self._is_locked:
-                self._is_locked = True
+        motor = self.coordinator.state.get("motor_state")
+        motor_true_is_unlocked = self._lock_cfg.get("motor_state_true_is_unlocked")
 
         if self._lock_cfg.get("auto_lock_reflects_lock_state", True):
             auto_lock = self.coordinator.state.get("auto_lock")
@@ -150,8 +145,19 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
                 elif auto_lock is True and not self._is_locked:
                     self._is_locked = True
 
+        lock_state_is_shadowed = motor_true_is_unlocked and motor is not None
         lock_state = self.coordinator.state.get("lock_state")
-        if lock_state is not None:
+        if (
+            lock_state is not None
+            and self._lock_cfg.get("lock_state_reflects_lock_state", True)
+            and not lock_state_is_shadowed
+        ):
             self._is_locked = bool(lock_state)
+
+        if self._lock_cfg.get("motor_state_reflects_lock_state", True):
+            if motor_true_is_unlocked and motor is not None:
+                self._is_locked = not bool(motor)
+            elif motor is False and not self._is_locked:
+                self._is_locked = True
 
         super()._handle_coordinator_update()

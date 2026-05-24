@@ -439,7 +439,10 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             self._schedule_gateway_status_listener_retry()
             return False
         if not started:
-            self._schedule_gateway_status_listener_retry()
+            if getattr(listener, "retryable", True):
+                self._schedule_gateway_status_listener_retry()
+            else:
+                self._cancel_gateway_status_listener_retry()
             return False
         self._cancel_gateway_status_listener_retry()
         self._gateway_status_listener = listener
@@ -1222,13 +1225,13 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             await asyncio.sleep(1)
 
     def _command_target_matches_state(self, *, action_unlock: bool) -> bool | None:
-        lock_state = self.state.get("lock_state")
-        if lock_state is not None:
-            return bool(lock_state) is (not action_unlock)
-
         motor_state = self.state.get("motor_state")
         if motor_state is not None and self._lock_cfg().get("motor_state_true_is_unlocked"):
             return bool(motor_state) is action_unlock
+
+        lock_state = self.state.get("lock_state")
+        if lock_state is not None and self._lock_cfg().get("lock_state_reflects_lock_state", True):
+            return bool(lock_state) is (not action_unlock)
 
         auto_lock = self.state.get("auto_lock")
         if auto_lock is not None and self._lock_cfg().get("auto_lock_reflects_lock_state", True):

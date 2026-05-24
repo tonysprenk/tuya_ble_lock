@@ -15,6 +15,12 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 _LOGGER = logging.getLogger(__name__)
 
 _DP71_MANUAL_LOCK_CODES = {"manual_lock"}
+_BATTERY_STATE_CODES = {
+    "high": 0,
+    "medium": 1,
+    "low": 2,
+    "exhausted": 3,
+}
 
 
 def extract_dps_from_gateway_message(
@@ -102,6 +108,10 @@ def _raw_bytes_from_status_value(
         locked = _manual_lock_status_value(value)
         if locked is not None:
             return _synthetic_dp71_lock_state_payload(locked)
+    if dp_id == 9:
+        battery_state = _battery_state_status_value(value)
+        if battery_state is not None:
+            return bytes([battery_state])
     if isinstance(value, bool):
         return b"\x01" if value else b"\x00"
     if isinstance(value, int):
@@ -113,6 +123,21 @@ def _raw_bytes_from_status_value(
             return base64.b64decode(value, validate=True)
         except (binascii.Error, ValueError):
             return value.encode()
+    return None
+
+
+def _battery_state_status_value(value: Any) -> int | None:
+    if isinstance(value, int):
+        if 0 <= value <= 255:
+            return value
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized.isdigit():
+            parsed = int(normalized)
+            if 0 <= parsed <= 255:
+                return parsed
+        return _BATTERY_STATE_CODES.get(normalized)
     return None
 
 
@@ -208,6 +233,7 @@ class TuyaGatewayStatusListener:
         self._mqtt_password = ""
         self._started = False
         self._closed = False
+        self.retryable = True
 
     @property
     def started(self) -> bool:
@@ -221,8 +247,10 @@ class TuyaGatewayStatusListener:
         """
         if self._started:
             return True
+        self.retryable = True
         if not self._credentials:
             _LOGGER.debug("Tuya gateway listener not started for %s: missing credentials", self.device_id)
+            self.retryable = False
             return False
 
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -241,6 +269,7 @@ class TuyaGatewayStatusListener:
                 "Tuya gateway listener for %s requires Tuya IoT OpenAPI Access ID and Access Secret",
                 self.device_id,
             )
+            self.retryable = False
             return False
 
         session = async_get_clientsession(self.hass)
@@ -253,6 +282,7 @@ class TuyaGatewayStatusListener:
         mqtt_resp = await client.async_get_open_hub_config(_new_link_id())
         if not mqtt_resp.get("success"):
             error = mqtt_resp.get("errorMsg", mqtt_resp.get("msg", "MQTT config failed"))
+            self.retryable = _open_hub_error_is_retryable(error)
             _LOGGER.warning("Tuya gateway MQTT config failed for %s: %s", self.device_id, error)
             return False
 
@@ -410,6 +440,26 @@ class TuyaGatewayStatusListener:
 
 def _new_link_id() -> str:
     return uuid.uuid4().hex[:8]
+
+
+def _open_hub_error_is_retryable(error: Any) -> bool:
+    message = str(error or "").strip().lower()
+    if not message:
+        return True
+    permanent_markers = (
+        "token invalid",
+        "invalid token",
+        "access id invalid",
+        "accessid invalid",
+        "client id invalid",
+        "client_id invalid",
+        "permission deny",
+        "permission denied",
+        "sign invalid",
+        "signature invalid",
+        "unauthorized",
+    )
+    return not any(marker in message for marker in permanent_markers)
 
 
 def _status_summary_for_log(message: dict[str, Any]) -> list[dict[str, Any]]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
 import unittest
@@ -40,6 +41,17 @@ class DeviceProfilesTest(unittest.TestCase):
 
     def test_short_dp71_payload_has_unknown_lock_state(self):
         self.assertIsNone(self.profiles.parse_dp_value(b"\x00\x01", "dp71_lock_state"))
+
+    def test_raykube_profile_uses_polling_sync_without_mqtt_and_includes_battery(self):
+        profile_path = INTEGRATION_DIR / "device_profiles" / "hc7n0urm.json"
+        profile = json.loads(profile_path.read_text())
+        lock_cfg = profile["entities"]["lock"]
+
+        self.assertFalse(lock_cfg["gateway_status_listener"])
+        self.assertEqual(lock_cfg["gateway_control_verify_seconds"], 4)
+        self.assertFalse(lock_cfg["lock_state_reflects_lock_state"])
+        self.assertIn(9, profile["status_sync_dps"])
+        self.assertEqual(lock_cfg["gateway_status_code_map"]["battery_state"], 9)
 
 
 if __name__ == "__main__":

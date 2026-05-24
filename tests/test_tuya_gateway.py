@@ -131,6 +131,15 @@ class TuyaGatewayTest(unittest.TestCase):
         self.assertEqual(dps[0]["id"], 71)
         self.assertEqual(dps[0]["raw"][12], 0x01)
 
+    def test_battery_state_string_maps_to_dp9_enum(self):
+        dps = self.gateway.extract_dps_from_gateway_message(
+            {"data": {"devId": "device-1", "status": [{"code": "battery_state", "value": "low"}]}},
+            "device-1",
+            {"battery_state": 9},
+        )
+
+        self.assertEqual(dps, [{"id": 9, "raw": b"\x02"}])
+
     def test_decodes_aes_encrypted_gateway_payload(self):
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -247,6 +256,9 @@ class TuyaGatewayTest(unittest.TestCase):
         listener._on_mqtt_connect(client, None, None, 0)
 
         self.assertEqual(client.subscribed, ["topic/a", "topic/b"])
+
+    def test_token_invalid_open_hub_response_is_not_retryable(self):
+        self.assertFalse(self.gateway._open_hub_error_is_retryable("token invalid"))
 
 
 if __name__ == "__main__":

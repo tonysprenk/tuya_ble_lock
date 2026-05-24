@@ -535,6 +535,21 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_gateway_command_verification_prefers_motor_state_over_stale_lock_state(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            coordinator._profile["entities"]["lock"].update(
+                {
+                    "motor_state_true_is_unlocked": True,
+                }
+            )
+            coordinator.state["motor_state"] = True
+            coordinator.state["lock_state"] = True
+
+            self.assertTrue(coordinator._command_target_matches_state(action_unlock=True))
+
+        asyncio.run(scenario())
+
     def test_gateway_control_falls_back_when_openapi_status_does_not_reach_target(self):
         async def scenario():
             coordinator, session = self.make_coordinator()
@@ -817,6 +832,47 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
             await coordinator.async_stop_gateway_status_listener()
             self.assertTrue(handle.cancelled())
+
+        asyncio.run(scenario())
+
+    def test_gateway_status_listener_permanent_failure_does_not_retry(self):
+        async def scenario():
+            coordinator, _session = self.make_coordinator()
+            module = self.coordinator_module
+            coordinator._entry.data.update(
+                {
+                    module.CONF_TUYA_EMAIL: "user@example.com",
+                    module.CONF_TUYA_PASSWORD: "secret",
+                    module.CONF_TUYA_COUNTRY: "31",
+                    module.CONF_TUYA_REGION: "eu",
+                }
+            )
+            coordinator._profile["entities"]["lock"]["gateway_status_listener"] = True
+
+            gateway_module = types.ModuleType("custom_components.tuya_ble_lock.tuya_gateway")
+
+            class FakeListener:
+                retryable = False
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def async_start(self):
+                    return False
+
+            gateway_module.TuyaGatewayStatusListener = FakeListener
+            old_gateway = sys.modules.get("custom_components.tuya_ble_lock.tuya_gateway")
+            sys.modules["custom_components.tuya_ble_lock.tuya_gateway"] = gateway_module
+            try:
+                started = await coordinator.async_start_gateway_status_listener()
+            finally:
+                if old_gateway is not None:
+                    sys.modules["custom_components.tuya_ble_lock.tuya_gateway"] = old_gateway
+                else:
+                    sys.modules.pop("custom_components.tuya_ble_lock.tuya_gateway", None)
+
+            self.assertFalse(started)
+            self.assertIsNone(coordinator._gateway_status_retry_handle)
 
         asyncio.run(scenario())
 

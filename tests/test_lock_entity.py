@@ -217,6 +217,9 @@ class TuyaBLELockEntityTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_command_timeout_is_short_enough_for_homekit(self):
+        self.assertLessEqual(self.lock_module.LOCK_COMMAND_TIMEOUT_SECONDS, 20)
+
     def test_cloud_lock_state_updates_locked_state(self):
         entity, coordinator = self.make_entity()
         entity._is_locked = False
@@ -241,6 +244,17 @@ class TuyaBLELockEntityTest(unittest.TestCase):
         coordinator.state["motor_state"] = False
         entity._handle_coordinator_update()
         self.assertTrue(entity.is_locked)
+
+    def test_motor_state_takes_priority_over_stale_lock_state(self):
+        entity, coordinator = self.make_entity()
+        entity._is_locked = True
+        entity._lock_cfg["motor_state_true_is_unlocked"] = True
+
+        coordinator.state["motor_state"] = True
+        coordinator.state["lock_state"] = True
+        entity._handle_coordinator_update()
+
+        self.assertFalse(entity.is_locked)
 
     def test_auto_lock_setting_can_be_ignored_for_physical_lock_state(self):
         entity, coordinator = self.make_entity()
