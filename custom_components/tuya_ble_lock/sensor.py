@@ -52,13 +52,14 @@ class TuyaBLEBatterySensor(TuyaBLELockEntity, SensorEntity, RestoreEntity):
 
     @property
     def native_value(self) -> int | None:
+        state = self.coordinator.state.get("battery_state")
+        if state:
+            percentage = BATTERY_STATE_TO_PERCENT.get(state)
+            if percentage is not None:
+                return percentage
         pct = self.coordinator.state.get("battery_percent")
         if pct is not None:
             return pct
-        # Fall back to battery_state enum → approximate percentage
-        state = self.coordinator.state.get("battery_state")
-        if state:
-            return BATTERY_STATE_TO_PERCENT.get(state)
         return None
 
     async def async_added_to_hass(self) -> None:
