@@ -301,6 +301,9 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
         except (TypeError, ValueError):
             return 8.0
 
+    def _gateway_control_fallback_on_unconfirmed(self) -> bool:
+        return bool(self._lock_cfg().get("gateway_control_fallback_on_unconfirmed", True))
+
     def _gateway_status_listener_enabled(self) -> bool:
         return bool(self._lock_cfg().get("gateway_status_listener"))
 
@@ -1177,6 +1180,11 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
                 action_name,
                 self._entry.title,
             )
+            if not self._gateway_control_fallback_on_unconfirmed():
+                raise UpdateFailed(
+                    f"Tuya OpenAPI accepted {action_name} command for {self._entry.title} "
+                    "but target state was not observed"
+                )
             return False
 
         unlock_dp = self._get_unlock_dp()
