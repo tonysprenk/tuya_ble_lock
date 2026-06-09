@@ -48,8 +48,9 @@ class DeviceProfilesTest(unittest.TestCase):
         lock_cfg = profile["entities"]["lock"]
 
         self.assertFalse(lock_cfg["gateway_status_listener"])
-        self.assertEqual(lock_cfg["gateway_control_verify_seconds"], 10)
+        self.assertEqual(lock_cfg["gateway_control_verify_seconds"], 15)
         self.assertFalse(lock_cfg["gateway_control_fallback_on_unconfirmed"])
+        self.assertTrue(lock_cfg["gateway_control_verify_mobile_fallback"])
         self.assertFalse(lock_cfg["lock_state_reflects_lock_state"])
         self.assertIn(9, profile["status_sync_dps"])
         self.assertEqual(lock_cfg["gateway_status_code_map"]["battery_state"], 9)

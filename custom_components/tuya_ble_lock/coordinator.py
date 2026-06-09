@@ -304,6 +304,9 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
     def _gateway_control_fallback_on_unconfirmed(self) -> bool:
         return bool(self._lock_cfg().get("gateway_control_fallback_on_unconfirmed", True))
 
+    def _gateway_control_verify_mobile_fallback(self) -> bool:
+        return bool(self._lock_cfg().get("gateway_control_verify_mobile_fallback", False))
+
     def _gateway_status_listener_enabled(self) -> bool:
         return bool(self._lock_cfg().get("gateway_status_listener"))
 
@@ -964,6 +967,9 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             return False
         if await self._async_refresh_status_from_openapi(source_dps):
             return True
+        return await self._async_refresh_status_from_mobile_cloud(source_dps)
+
+    async def _async_refresh_status_from_mobile_cloud(self, source_dps: tuple[int, ...]) -> bool:
         credentials = self._cloud_credentials()
         if not credentials:
             return False
@@ -982,7 +988,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             )
         except Exception as exc:
             _LOGGER.debug(
-                "Cloud status refresh failed for %s: %s",
+                "Mobile cloud status refresh failed for %s: %s",
                 self._entry.title,
                 _safe_exception_message(exc),
             )
@@ -996,7 +1002,7 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             [{"id": dp_id, "raw": raw} for dp_id, raw in sorted(cloud_dps.items())]
         )
         _LOGGER.debug(
-            "Refreshed cloud status DPs for %s: %s",
+            "Refreshed mobile cloud status DPs for %s: %s",
             self._entry.title,
             [(dp_id, raw.hex()) for dp_id, raw in cloud_dps.items()],
         )
@@ -1221,14 +1227,21 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
 
     async def _async_wait_for_gateway_command_state(self, *, action_unlock: bool) -> bool:
         """Wait briefly until cloud status reflects a gateway command."""
+        source_dps = self._status_sync_dps()
         deadline = time.monotonic() + self._gateway_control_verify_seconds()
         while True:
-            await self._async_refresh_status_from_openapi(self._status_sync_dps())
+            await self._async_refresh_status_from_openapi(source_dps)
             matched = self._command_target_matches_state(action_unlock=action_unlock)
             if matched is True:
                 self.async_set_updated_data(self.state)
                 return True
             if time.monotonic() >= deadline:
+                if self._gateway_control_verify_mobile_fallback():
+                    if await self._async_refresh_status_from_mobile_cloud(source_dps):
+                        matched = self._command_target_matches_state(action_unlock=action_unlock)
+                        if matched is True:
+                            self.async_set_updated_data(self.state)
+                            return True
                 return False
             await asyncio.sleep(1)
 

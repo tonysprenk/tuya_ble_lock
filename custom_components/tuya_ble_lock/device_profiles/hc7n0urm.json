@@ -20,8 +20,9 @@
       "gateway_status_listener": false,
       "ble_advertisement_listener": true,
       "openapi_status_sync": true,
-      "gateway_control_verify_seconds": 10,
+      "gateway_control_verify_seconds": 15,
       "gateway_control_fallback_on_unconfirmed": false,
+      "gateway_control_verify_mobile_fallback": true,
       "gateway_status_code_map": {
         "battery_state": 9,
         "automatic_lock": 33,
