@@ -76,6 +76,73 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
             return hass.async_create_task(coro, name=name)
         return asyncio.create_task(coro, name=name)
 
+    def _coordinator_locked_state(self) -> tuple[bool | None, str | None]:
+        """Return the most authoritative lock state currently reported by DPs."""
+        motor = self.coordinator.state.get("motor_state")
+        motor_true_is_unlocked = self._lock_cfg.get("motor_state_true_is_unlocked")
+        locked: bool | None = None
+        source: str | None = None
+
+        if self._lock_cfg.get("auto_lock_reflects_lock_state", True):
+            auto_lock = self.coordinator.state.get("auto_lock")
+            if auto_lock is not None:
+                locked = bool(auto_lock)
+                source = "auto_lock"
+
+        lock_state_is_shadowed = motor_true_is_unlocked and motor is not None
+        lock_state = self.coordinator.state.get("lock_state")
+        if (
+            lock_state is not None
+            and self._lock_cfg.get("lock_state_reflects_lock_state", True)
+            and not lock_state_is_shadowed
+        ):
+            locked = bool(lock_state)
+            source = "lock_state"
+
+        if self._lock_cfg.get("motor_state_reflects_lock_state", True):
+            if motor_true_is_unlocked and motor is not None:
+                locked = not bool(motor)
+                source = "motor_state"
+            elif motor is False and not self._is_locked:
+                locked = True
+                source = "motor_state"
+
+        return locked, source
+
+    def _apply_command_success_state(self, action_name: str, target_locked: bool) -> None:
+        locked, source = self._coordinator_locked_state()
+        target_name = "locked" if target_locked else "unlocked"
+
+        if locked is None:
+            self._is_locked = target_locked
+            _LOGGER.info(
+                "%s command for %s completed; no confirmed state source is available, assuming %s",
+                action_name.capitalize(),
+                self._mac,
+                target_name,
+            )
+            return
+
+        reported_name = "locked" if locked else "unlocked"
+        self._is_locked = locked
+        if locked == target_locked:
+            _LOGGER.info(
+                "%s command for %s confirmed by %s as %s",
+                action_name.capitalize(),
+                self._mac,
+                source,
+                target_name,
+            )
+            return
+
+        _LOGGER.warning(
+            "%s command for %s completed but %s still reports %s; keeping confirmed state",
+            action_name.capitalize(),
+            self._mac,
+            source,
+            reported_name,
+        )
+
     async def _async_run_command(self, action_name: str, command, target_locked: bool) -> None:
         try:
             await asyncio.wait_for(
@@ -92,7 +159,7 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         except Exception as exc:
             _LOGGER.warning("Failed to %s %s: %s", action_name, self._mac, exc)
         else:
-            self._is_locked = target_locked
+            self._apply_command_success_state(action_name, target_locked)
         finally:
             if action_name == "lock":
                 self._locking = False
@@ -125,39 +192,16 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
     def _handle_coordinator_update(self) -> None:
         """React to DP pushes for lock state.
 
-        Motor state:
-        - True = motor actively running (lock/unlock in progress)
-        - False = motor stopped → lock is now locked
-        Only re-lock when currently unlocked to avoid spurious updates.
+        Motor-state interpretation is profile-specific. The Raykube profile
+        treats DP47 True as unlocked and uses it as the physical source of truth.
+        Older profiles only use motor_state=False as a relock signal.
 
         Passage mode sync:
         - auto_lock=False (passage ON) = lock is unlocked
         - auto_lock=True (passage OFF) = lock is locked
         """
-        motor = self.coordinator.state.get("motor_state")
-        motor_true_is_unlocked = self._lock_cfg.get("motor_state_true_is_unlocked")
-
-        if self._lock_cfg.get("auto_lock_reflects_lock_state", True):
-            auto_lock = self.coordinator.state.get("auto_lock")
-            if auto_lock is not None:
-                if auto_lock is False and self._is_locked:
-                    self._is_locked = False
-                elif auto_lock is True and not self._is_locked:
-                    self._is_locked = True
-
-        lock_state_is_shadowed = motor_true_is_unlocked and motor is not None
-        lock_state = self.coordinator.state.get("lock_state")
-        if (
-            lock_state is not None
-            and self._lock_cfg.get("lock_state_reflects_lock_state", True)
-            and not lock_state_is_shadowed
-        ):
-            self._is_locked = bool(lock_state)
-
-        if self._lock_cfg.get("motor_state_reflects_lock_state", True):
-            if motor_true_is_unlocked and motor is not None:
-                self._is_locked = not bool(motor)
-            elif motor is False and not self._is_locked:
-                self._is_locked = True
+        locked, _source = self._coordinator_locked_state()
+        if locked is not None:
+            self._is_locked = locked
 
         super()._handle_coordinator_update()

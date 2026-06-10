@@ -201,6 +201,48 @@ class TuyaBLELockEntityTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_lock_success_keeps_confirmed_state_when_target_not_observed(self):
+        async def scenario():
+            entity, coordinator = self.make_entity()
+            entity._is_locked = False
+            entity._lock_cfg["motor_state_true_is_unlocked"] = True
+            coordinator.state["motor_state"] = True
+
+            await asyncio.wait_for(entity.async_lock(), timeout=0.05)
+            task = entity._command_task
+
+            await asyncio.wait_for(coordinator.lock_started.wait(), timeout=0.05)
+            coordinator.finish_lock.set()
+            previous_disable_level = logging.root.manager.disable
+            logging.disable(logging.CRITICAL)
+            try:
+                await asyncio.wait_for(task, timeout=0.2)
+            finally:
+                logging.disable(previous_disable_level)
+
+            self.assertFalse(entity.is_locking)
+            self.assertFalse(entity.is_locked)
+
+        asyncio.run(scenario())
+
+    def test_unlock_success_uses_confirmed_state_when_available(self):
+        async def scenario():
+            entity, coordinator = self.make_entity()
+            entity._lock_cfg["motor_state_true_is_unlocked"] = True
+            coordinator.state["motor_state"] = True
+
+            await asyncio.wait_for(entity.async_unlock(), timeout=0.05)
+            task = entity._command_task
+
+            await asyncio.wait_for(coordinator.unlock_started.wait(), timeout=0.05)
+            coordinator.finish_unlock.set()
+            await asyncio.wait_for(task, timeout=0.2)
+
+            self.assertFalse(entity.is_unlocking)
+            self.assertFalse(entity.is_locked)
+
+        asyncio.run(scenario())
+
     def test_rejects_overlapping_lock_commands(self):
         async def scenario():
             entity, coordinator = self.make_entity()
