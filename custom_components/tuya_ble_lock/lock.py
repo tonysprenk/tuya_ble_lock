@@ -11,7 +11,6 @@ import asyncio
 import logging
 
 from homeassistant.components.lock import LockEntity
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import TuyaBLELockEntity
@@ -20,6 +19,8 @@ from .models import TuyaBLELockData
 _LOGGER = logging.getLogger(__name__)
 
 LOCK_COMMAND_TIMEOUT_SECONDS = 20
+LOCK_COMMAND_SAFETY_RELOCK_SECONDS = 120
+LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS = 2
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -36,6 +37,8 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         self._locking = False
         self._unlocking = False
         self._command_task: asyncio.Task | None = None
+        self._queued_target_locked: bool | None = None
+        self._safety_relock_task: asyncio.Task | None = None
         self._is_locked = True
         runtime_data = getattr(entry, "runtime_data", None)
         profile = getattr(runtime_data, "profile", {}) if runtime_data else {}
@@ -75,6 +78,73 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         if hass is not None:
             return hass.async_create_task(coro, name=name)
         return asyncio.create_task(coro, name=name)
+
+    def _set_pending_state(self, target_locked: bool) -> None:
+        self._locking = target_locked
+        self._unlocking = not target_locked
+        self.async_write_ha_state()
+
+    def _start_lock_command_task(self, target_locked: bool) -> None:
+        action_name = "lock" if target_locked else "unlock"
+        command = self.coordinator.async_lock if target_locked else self.coordinator.async_unlock
+        self._command_task = self._start_command_task(
+            self._async_run_command(action_name, command, target_locked),
+            f"tuya_ble_lock_{action_name}_{self._mac}",
+        )
+
+    def _queue_or_start_command(self, target_locked: bool) -> None:
+        if target_locked:
+            self._start_safety_relock_monitor()
+        else:
+            self._cancel_safety_relock_monitor()
+        self._set_pending_state(target_locked)
+        if self._command_in_progress():
+            self._queued_target_locked = target_locked
+            _LOGGER.info(
+                "Queued %s command for %s while another command is in progress",
+                "lock" if target_locked else "unlock",
+                self._mac,
+            )
+            return
+        self._queued_target_locked = None
+        self._start_lock_command_task(target_locked)
+
+    def _cancel_safety_relock_monitor(self) -> None:
+        task = self._safety_relock_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._safety_relock_task = None
+
+    def _start_safety_relock_monitor(self) -> None:
+        task = self._safety_relock_task
+        if task is not None and not task.done():
+            return
+        self._safety_relock_task = self._start_command_task(
+            self._async_safety_relock_monitor(),
+            f"tuya_ble_lock_safety_relock_{self._mac}",
+        )
+
+    async def _async_safety_relock_monitor(self) -> None:
+        deadline = asyncio.get_running_loop().time() + LOCK_COMMAND_SAFETY_RELOCK_SECONDS
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS)
+                if self._command_in_progress() or self._locking:
+                    continue
+                if self._is_locked:
+                    continue
+                _LOGGER.warning(
+                    "Re-locking %s because it reopened within %ds of a lock command",
+                    self._mac,
+                    LOCK_COMMAND_SAFETY_RELOCK_SECONDS,
+                )
+                self._queue_or_start_command(True)
+                return
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._safety_relock_task is asyncio.current_task():
+                self._safety_relock_task = None
 
     def _coordinator_locked_state(self) -> tuple[bool | None, str | None]:
         """Return the most authoritative lock state currently reported by DPs."""
@@ -168,26 +238,16 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
             self.async_write_ha_state()
             if self._command_task is asyncio.current_task():
                 self._command_task = None
+                queued_target = self._queued_target_locked
+                self._queued_target_locked = None
+                if queued_target is not None and queued_target != self._is_locked:
+                    self._queue_or_start_command(queued_target)
 
     async def async_lock(self, **kwargs) -> None:
-        if self._command_in_progress():
-            raise HomeAssistantError("A Tuya BLE lock command is already in progress")
-        self._locking = True
-        self.async_write_ha_state()
-        self._command_task = self._start_command_task(
-            self._async_run_command("lock", self.coordinator.async_lock, True),
-            f"tuya_ble_lock_lock_{self._mac}",
-        )
+        self._queue_or_start_command(True)
 
     async def async_unlock(self, **kwargs) -> None:
-        if self._command_in_progress():
-            raise HomeAssistantError("A Tuya BLE lock command is already in progress")
-        self._unlocking = True
-        self.async_write_ha_state()
-        self._command_task = self._start_command_task(
-            self._async_run_command("unlock", self.coordinator.async_unlock, False),
-            f"tuya_ble_lock_unlock_{self._mac}",
-        )
+        self._queue_or_start_command(False)
 
     def _handle_coordinator_update(self) -> None:
         """React to DP pushes for lock state.

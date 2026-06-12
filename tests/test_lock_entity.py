@@ -103,14 +103,18 @@ class ControlledCoordinator:
         self.finish_unlock = asyncio.Event()
         self.lock_error = None
         self.unlock_error = None
+        self.lock_count = 0
+        self.unlock_count = 0
 
     async def async_lock(self):
+        self.lock_count += 1
         self.lock_started.set()
         await self.finish_lock.wait()
         if self.lock_error:
             raise self.lock_error
 
     async def async_unlock(self):
+        self.unlock_count += 1
         self.unlock_started.set()
         await self.finish_unlock.wait()
         if self.unlock_error:
@@ -243,7 +247,7 @@ class TuyaBLELockEntityTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_rejects_overlapping_lock_commands(self):
+    def test_queues_latest_command_when_command_is_in_progress(self):
         async def scenario():
             entity, coordinator = self.make_entity()
 
@@ -251,11 +255,121 @@ class TuyaBLELockEntityTest(unittest.TestCase):
             task = entity._command_task
             await asyncio.wait_for(coordinator.unlock_started.wait(), timeout=0.05)
 
-            with self.assertRaises(FakeHomeAssistantError):
-                await entity.async_lock()
+            await asyncio.wait_for(entity.async_lock(), timeout=0.05)
+
+            self.assertTrue(entity.is_locking)
+            self.assertFalse(entity.is_unlocking)
+            self.assertIs(entity._command_task, task)
+
+            coordinator.finish_unlock.set()
+            await asyncio.wait_for(coordinator.lock_started.wait(), timeout=0.2)
+            queued_task = entity._command_task
+            self.assertIsNotNone(queued_task)
+            self.assertIsNot(queued_task, task)
+
+            coordinator.finish_lock.set()
+            await asyncio.wait_for(queued_task, timeout=0.2)
+
+            self.assertFalse(entity.is_locking)
+            self.assertFalse(entity.is_unlocking)
+            self.assertTrue(entity.is_locked)
+
+        asyncio.run(scenario())
+
+    def test_collapses_multiple_queued_commands_to_latest_target(self):
+        async def scenario():
+            entity, coordinator = self.make_entity()
+
+            await asyncio.wait_for(entity.async_unlock(), timeout=0.05)
+            task = entity._command_task
+            await asyncio.wait_for(coordinator.unlock_started.wait(), timeout=0.05)
+
+            await asyncio.wait_for(entity.async_lock(), timeout=0.05)
+            await asyncio.wait_for(entity.async_unlock(), timeout=0.05)
+
+            self.assertTrue(entity.is_unlocking)
+            self.assertFalse(entity.is_locking)
 
             coordinator.finish_unlock.set()
             await asyncio.wait_for(task, timeout=0.2)
+
+            self.assertIsNone(entity._command_task)
+            self.assertFalse(entity.is_locking)
+            self.assertFalse(entity.is_unlocking)
+            self.assertFalse(entity.is_locked)
+
+        asyncio.run(scenario())
+
+    def test_safety_relock_reissues_lock_if_lock_reopens_after_lock_command(self):
+        async def scenario():
+            module = self.lock_module
+            old_window = module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS
+            old_poll = module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS
+            module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS = 0.2
+            module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS = 0.01
+            try:
+                entity, coordinator = self.make_entity()
+                entity._is_locked = False
+
+                await asyncio.wait_for(entity.async_lock(), timeout=0.05)
+                task = entity._command_task
+                await asyncio.wait_for(coordinator.lock_started.wait(), timeout=0.05)
+                coordinator.finish_lock.set()
+                await asyncio.wait_for(task, timeout=0.2)
+
+                self.assertTrue(entity.is_locked)
+                self.assertEqual(coordinator.lock_count, 1)
+
+                entity._is_locked = False
+                entity.async_write_ha_state()
+
+                for _ in range(20):
+                    if coordinator.lock_count >= 2:
+                        break
+                    await asyncio.sleep(0.01)
+
+                self.assertGreaterEqual(coordinator.lock_count, 2)
+            finally:
+                module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS = old_window
+                module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS = old_poll
+                safety_task = getattr(entity, "_safety_relock_task", None)
+                if safety_task is not None:
+                    safety_task.cancel()
+
+        asyncio.run(scenario())
+
+    def test_unlock_cancels_safety_relock_monitor(self):
+        async def scenario():
+            module = self.lock_module
+            old_window = module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS
+            old_poll = module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS
+            module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS = 0.2
+            module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS = 0.01
+            try:
+                entity, coordinator = self.make_entity()
+                entity._is_locked = False
+
+                await asyncio.wait_for(entity.async_lock(), timeout=0.05)
+                task = entity._command_task
+                await asyncio.wait_for(coordinator.lock_started.wait(), timeout=0.05)
+                coordinator.finish_lock.set()
+                await asyncio.wait_for(task, timeout=0.2)
+
+                await asyncio.wait_for(entity.async_unlock(), timeout=0.05)
+                unlock_task = entity._command_task
+                coordinator.finish_unlock.set()
+                await asyncio.wait_for(unlock_task, timeout=0.2)
+
+                self.assertFalse(entity.is_locked)
+                self.assertEqual(coordinator.lock_count, 1)
+                await asyncio.sleep(0.05)
+                self.assertEqual(coordinator.lock_count, 1)
+            finally:
+                module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS = old_window
+                module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS = old_poll
+                safety_task = getattr(entity, "_safety_relock_task", None)
+                if safety_task is not None:
+                    safety_task.cancel()
 
         asyncio.run(scenario())
 
