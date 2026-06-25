@@ -21,6 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 LOCK_COMMAND_TIMEOUT_SECONDS = 20
 LOCK_COMMAND_SAFETY_RELOCK_SECONDS = 120
 LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS = 2
+LOCK_EXTERNAL_STATE_CONFIRMATIONS = 1
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -39,6 +40,8 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         self._command_task: asyncio.Task | None = None
         self._queued_target_locked: bool | None = None
         self._safety_relock_task: asyncio.Task | None = None
+        self._external_state_candidate: tuple[bool, str | None] | None = None
+        self._external_state_candidate_count = 0
         self._is_locked = True
         runtime_data = getattr(entry, "runtime_data", None)
         profile = getattr(runtime_data, "profile", {}) if runtime_data else {}
@@ -93,9 +96,7 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         )
 
     def _queue_or_start_command(self, target_locked: bool) -> None:
-        if target_locked:
-            self._start_safety_relock_monitor()
-        else:
+        if not target_locked:
             self._cancel_safety_relock_monitor()
         self._set_pending_state(target_locked)
         if self._command_in_progress():
@@ -185,16 +186,20 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
 
         if locked is None:
             self._is_locked = target_locked
+            self._clear_external_state_candidate()
             _LOGGER.info(
                 "%s command for %s completed; no confirmed state source is available, assuming %s",
                 action_name.capitalize(),
                 self._mac,
                 target_name,
             )
+            if target_locked:
+                self._start_safety_relock_monitor()
             return
 
         reported_name = "locked" if locked else "unlocked"
         self._is_locked = locked
+        self._clear_external_state_candidate()
         if locked == target_locked:
             _LOGGER.info(
                 "%s command for %s confirmed by %s as %s",
@@ -203,6 +208,8 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
                 source,
                 target_name,
             )
+            if target_locked:
+                self._start_safety_relock_monitor()
             return
 
         _LOGGER.warning(
@@ -212,6 +219,74 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
             source,
             reported_name,
         )
+
+    def _clear_external_state_candidate(self) -> None:
+        self._external_state_candidate = None
+        self._external_state_candidate_count = 0
+
+    def _external_state_confirmations_required(self) -> int:
+        configured = self._lock_cfg.get(
+            "external_state_confirmations",
+            LOCK_EXTERNAL_STATE_CONFIRMATIONS,
+        )
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            return LOCK_EXTERNAL_STATE_CONFIRMATIONS
+
+    def _pending_target_matches(self, locked: bool) -> bool:
+        return (self._locking and locked) or (self._unlocking and not locked)
+
+    def _apply_external_locked_state(self, locked: bool, source: str | None) -> bool:
+        """Apply unsolicited state reports only after enough matching evidence."""
+        if locked == self._is_locked:
+            self._clear_external_state_candidate()
+            return False
+
+        if self._pending_target_matches(locked):
+            self._is_locked = locked
+            self._clear_external_state_candidate()
+            _LOGGER.info(
+                "Accepted %s state for %s from %s while command is pending",
+                "locked" if locked else "unlocked",
+                self._mac,
+                source,
+            )
+            if locked:
+                self._start_safety_relock_monitor()
+            else:
+                self._cancel_safety_relock_monitor()
+            return True
+
+        confirmations_required = self._external_state_confirmations_required()
+        candidate = (locked, source)
+        if self._external_state_candidate == candidate:
+            self._external_state_candidate_count += 1
+        else:
+            self._external_state_candidate = candidate
+            self._external_state_candidate_count = 1
+
+        if self._external_state_candidate_count < confirmations_required:
+            _LOGGER.debug(
+                "Holding external %s state for %s from %s until %d/%d confirmations",
+                "locked" if locked else "unlocked",
+                self._mac,
+                source,
+                self._external_state_candidate_count,
+                confirmations_required,
+            )
+            return False
+
+        self._is_locked = locked
+        self._clear_external_state_candidate()
+        _LOGGER.info(
+            "Accepted external %s state for %s from %s after %d confirmations",
+            "locked" if locked else "unlocked",
+            self._mac,
+            source,
+            confirmations_required,
+        )
+        return True
 
     async def _async_run_command(self, action_name: str, command, target_locked: bool) -> None:
         try:
@@ -260,8 +335,8 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
         - auto_lock=False (passage ON) = lock is unlocked
         - auto_lock=True (passage OFF) = lock is locked
         """
-        locked, _source = self._coordinator_locked_state()
+        locked, source = self._coordinator_locked_state()
         if locked is not None:
-            self._is_locked = locked
+            self._apply_external_locked_state(locked, source)
 
         super()._handle_coordinator_update()

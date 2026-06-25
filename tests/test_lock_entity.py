@@ -205,6 +205,43 @@ class TuyaBLELockEntityTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_failed_lock_does_not_start_safety_relock_monitor(self):
+        async def scenario():
+            module = self.lock_module
+            old_window = module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS
+            old_poll = module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS
+            module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS = 0.2
+            module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS = 0.01
+            try:
+                entity, coordinator = self.make_entity()
+                entity._is_locked = False
+                coordinator.lock_error = RuntimeError("lock command failed")
+
+                await asyncio.wait_for(entity.async_lock(), timeout=0.05)
+                task = entity._command_task
+                await asyncio.wait_for(coordinator.lock_started.wait(), timeout=0.05)
+                coordinator.finish_lock.set()
+                previous_disable_level = logging.root.manager.disable
+                logging.disable(logging.CRITICAL)
+                try:
+                    await asyncio.wait_for(task, timeout=0.2)
+                finally:
+                    logging.disable(previous_disable_level)
+
+                await asyncio.sleep(0.05)
+
+                self.assertFalse(entity.is_locked)
+                self.assertEqual(coordinator.lock_count, 1)
+                self.assertIsNone(entity._safety_relock_task)
+            finally:
+                module.LOCK_COMMAND_SAFETY_RELOCK_SECONDS = old_window
+                module.LOCK_COMMAND_SAFETY_RELOCK_POLL_SECONDS = old_poll
+                safety_task = getattr(entity, "_safety_relock_task", None)
+                if safety_task is not None:
+                    safety_task.cancel()
+
+        asyncio.run(scenario())
+
     def test_lock_success_keeps_confirmed_state_when_target_not_observed(self):
         async def scenario():
             entity, coordinator = self.make_entity()
@@ -387,6 +424,35 @@ class TuyaBLELockEntityTest(unittest.TestCase):
         coordinator.state["lock_state"] = False
         entity._handle_coordinator_update()
         self.assertFalse(entity.is_locked)
+
+    def test_external_state_can_require_multiple_confirmations(self):
+        entity, coordinator = self.make_entity()
+        entity._is_locked = False
+        entity._lock_cfg["external_state_confirmations"] = 2
+
+        coordinator.state["lock_state"] = True
+        entity._handle_coordinator_update()
+        self.assertFalse(entity.is_locked)
+
+        entity._handle_coordinator_update()
+        self.assertTrue(entity.is_locked)
+
+    def test_pending_command_state_bypasses_external_confirmation_delay(self):
+        async def scenario():
+            entity, coordinator = self.make_entity()
+            entity._is_locked = False
+            entity._locking = True
+            entity._lock_cfg["external_state_confirmations"] = 2
+
+            coordinator.state["lock_state"] = True
+            entity._handle_coordinator_update()
+
+            self.assertTrue(entity.is_locked)
+            safety_task = getattr(entity, "_safety_relock_task", None)
+            if safety_task is not None:
+                safety_task.cancel()
+
+        asyncio.run(scenario())
 
     def test_motor_state_can_drive_physical_lock_state(self):
         entity, coordinator = self.make_entity()

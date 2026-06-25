@@ -36,6 +36,7 @@
       "use_cloud_check_payload": true,
       "auto_lock_reflects_lock_state": false,
       "lock_state_reflects_lock_state": false,
+      "external_state_confirmations": 2,
       "pair_central_dp70": false,
       "log_cloud_identity_debug": false
     },
