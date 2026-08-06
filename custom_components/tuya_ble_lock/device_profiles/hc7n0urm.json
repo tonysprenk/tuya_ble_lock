@@ -3,7 +3,7 @@
   "name": "Raykube A1 Ultra-JM",
   "model": "A1 Ultra-JM",
   "category": "jtmspro",
-  "status_sync_seconds": 2,
+  "status_sync_seconds": 60,
   "status_sync_dps": [9, 33, 47],
   "entities": {
     "lock": {
@@ -13,7 +13,7 @@
       "gateway_lan_host": "192.168.2.2",
       "gateway_child_cid": "cdaf90aaa63d669e",
       "gateway_lan_protocol_version": 3.4,
-      "gateway_lan_status_listener": false,
+      "gateway_lan_status_listener": true,
       "gateway_lan_status_poll_seconds": 1,
       "gateway_lan_status_timeout_seconds": 1,
       "gateway_lan_status_read_timeout_seconds": 2,

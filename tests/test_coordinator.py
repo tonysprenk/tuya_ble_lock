@@ -217,7 +217,7 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_status_sync_interval_allows_two_second_cloud_fallback_poll(self):
+    def test_status_sync_interval_uses_configured_seconds(self):
         async def scenario():
             coordinator, _session = self.make_coordinator()
 
@@ -260,7 +260,7 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_background_poll_uses_openapi_before_gateway_lan_when_enabled(self):
+    def test_background_poll_prefers_gateway_lan_before_openapi_when_enabled(self):
         async def scenario():
             coordinator, session = self.make_coordinator()
             session.is_connected = False
@@ -274,11 +274,11 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
             async def refresh_status_from_cloud():
                 events.append("cloud")
-                return True
+                raise AssertionError("Cloud status should not run when LAN status succeeds")
 
             async def refresh_status_from_gateway_lan():
                 events.append("lan")
-                raise AssertionError("LAN status should not run before enabled OpenAPI sync")
+                return True
 
             async def fetch_status():
                 raise AssertionError("BLE status should not run when OpenAPI succeeds")
@@ -289,7 +289,7 @@ class TuyaBLELockCoordinatorTest(unittest.TestCase):
 
             await coordinator._async_update_data()
 
-            self.assertEqual(events, ["cloud"])
+            self.assertEqual(events, ["lan"])
             self.assertFalse(session.is_connected)
 
         asyncio.run(scenario())

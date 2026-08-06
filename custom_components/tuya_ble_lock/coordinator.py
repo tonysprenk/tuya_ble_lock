@@ -243,10 +243,13 @@ class TuyaBLELockCoordinator(DataUpdateCoordinator):
             opened_connection = False
             used_ble = False
             try:
+                prefer_gateway_lan_status = self._gateway_lan_status_listener_enabled()
+                if prefer_gateway_lan_status and await self._async_refresh_status_from_gateway_lan():
+                    return self.state
                 if self._lock_cfg().get("openapi_status_sync"):
                     if await self._async_refresh_status_from_cloud():
                         return self.state
-                if await self._async_refresh_status_from_gateway_lan():
+                if not prefer_gateway_lan_status and await self._async_refresh_status_from_gateway_lan():
                     return self.state
                 if not self._lock_cfg().get("openapi_status_sync") and await self._async_refresh_status_from_cloud():
                     return self.state
