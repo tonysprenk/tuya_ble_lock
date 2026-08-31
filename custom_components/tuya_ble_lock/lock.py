@@ -125,6 +125,11 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
             f"tuya_ble_lock_safety_relock_{self._mac}",
         )
 
+    def _motor_state_can_report_unlocked(self) -> bool:
+        if not self._lock_cfg.get("motor_state_unlock_requires_command", False):
+            return True
+        return self._pending_target_matches(False)
+
     async def _async_safety_relock_monitor(self) -> None:
         deadline = asyncio.get_running_loop().time() + LOCK_COMMAND_SAFETY_RELOCK_SECONDS
         try:
@@ -160,7 +165,11 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
                 locked = bool(auto_lock)
                 source = "auto_lock"
 
-        lock_state_is_shadowed = motor_true_is_unlocked and motor is not None
+        lock_state_is_shadowed = (
+            motor_true_is_unlocked
+            and motor is not None
+            and (not bool(motor) or self._motor_state_can_report_unlocked())
+        )
         lock_state = self.coordinator.state.get("lock_state")
         if (
             lock_state is not None
@@ -172,8 +181,18 @@ class TuyaBLELock(TuyaBLELockEntity, LockEntity, RestoreEntity):
 
         if self._lock_cfg.get("motor_state_reflects_lock_state", True):
             if motor_true_is_unlocked and motor is not None:
-                locked = not bool(motor)
-                source = "motor_state"
+                if bool(motor):
+                    if self._motor_state_can_report_unlocked():
+                        locked = False
+                        source = "motor_state"
+                    else:
+                        _LOGGER.debug(
+                            "Ignoring unsolicited unlocked motor_state for %s",
+                            self._mac,
+                        )
+                else:
+                    locked = True
+                    source = "motor_state"
             elif motor is False and not self._is_locked:
                 locked = True
                 source = "motor_state"

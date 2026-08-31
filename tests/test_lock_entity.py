@@ -425,6 +425,30 @@ class TuyaBLELockEntityTest(unittest.TestCase):
         entity._handle_coordinator_update()
         self.assertFalse(entity.is_locked)
 
+    def test_unsolicited_motor_unlocked_can_be_ignored(self):
+        entity, coordinator = self.make_entity()
+        entity._is_locked = True
+        entity._lock_cfg["motor_state_true_is_unlocked"] = True
+        entity._lock_cfg["motor_state_unlock_requires_command"] = True
+
+        coordinator.state["motor_state"] = True
+        entity._handle_coordinator_update()
+
+        self.assertTrue(entity.is_locked)
+
+    def test_pending_unlock_accepts_motor_unlocked_when_required(self):
+        entity, coordinator = self.make_entity()
+        entity._is_locked = True
+        entity._unlocking = True
+        entity._lock_cfg["motor_state_true_is_unlocked"] = True
+        entity._lock_cfg["motor_state_unlock_requires_command"] = True
+        entity._lock_cfg["external_state_confirmations"] = 2
+
+        coordinator.state["motor_state"] = True
+        entity._handle_coordinator_update()
+
+        self.assertFalse(entity.is_locked)
+
     def test_external_state_can_require_multiple_confirmations(self):
         entity, coordinator = self.make_entity()
         entity._is_locked = False

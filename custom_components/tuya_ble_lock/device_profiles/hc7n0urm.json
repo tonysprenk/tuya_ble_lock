@@ -31,6 +31,7 @@
       },
       "behavior": "momentary",
       "motor_state_true_is_unlocked": true,
+      "motor_state_unlock_requires_command": true,
       "check_code": "49945663",
       "check_code_dp": [73, 71],
       "use_cloud_check_payload": true,
